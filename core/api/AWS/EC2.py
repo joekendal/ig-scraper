@@ -1,9 +1,9 @@
-import boto3, subprocess
+import boto3, subprocess, time, atexit
 from botocore.exceptions import ClientError
 
 
 class EC2Proxy:
-    def __init__(self, id):
+    def __init__(self, id: int):
         self.id = id
         self.ec2 = ec2 = boto3.client('ec2')
         self.instanceID = self.__get_ec2_instance(self.id)
@@ -11,19 +11,21 @@ class EC2Proxy:
         self.publicIP = self._get_ip_address()
 
         self.__open_ssh_tunnel(self.publicIP)
+        atexit.register(self.close)
 
     def close(self):
         self.__close_ssh_tunnel()
 
     def __open_ssh_tunnel(self, ip):
         if self.ssh: self.__close_ssh_tunnel()
-        # print(f'Opening tunnel to {ip}')
+        print(f'Opening SSH tunnel to {ip}')
         self.ssh = subprocess.Popen([
-            "ssh", "-D", str(self.id + 1080), "-fCqN",
+            "ssh", "-D", str(self.id + 1080), "-CqN",
             "-i", "~/.ssh/igscraper.pem",
             "-o", "StrictHostKeyChecking=no",
             "ubuntu@{}".format(ip)
         ])
+        time.sleep(3)
 
     def _get_ip_address(self):
         address = self.ec2.describe_addresses(Filters=[
@@ -41,7 +43,7 @@ class EC2Proxy:
             return address[0]['PublicIp']
 
     def __close_ssh_tunnel(self):
-        # print("closing tunnel")
+        print("Closing SSH tunnel")
         self.ssh.terminate()
 
     def __get_ec2_instance(self, id):
@@ -72,6 +74,7 @@ class EC2Proxy:
                     instanceID = instances[0]['InstanceId']
                     return instanceID
         else:
+            # Create new EC2 instance
             instance = self.ec2.run_instances(
                 ImageId='ami-077a5b1762a2dde35', # Ubuntu 18
                 InstanceType='t2.nano',
@@ -105,7 +108,8 @@ class EC2Proxy:
             )
 
             instanceID = instance['Instances'][0]['InstanceId']
-            sleep(30)
+            print("Starting new EC2 instance...")
+            time.sleep(60)
             return instanceID
 
 
