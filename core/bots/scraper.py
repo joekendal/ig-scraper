@@ -1,12 +1,18 @@
 import threading, logging, time, sys, os, json
 
-sys.path.insert(0, os.getcwd())
 from core.api.InstagramAPI import InstagramAPI
 from core.api.InstagramScraper import InstagramScraper
 from core.api.AWS import EC2Proxy
 
+from core.db.models import User, Business
+
 
 class ScraperBot():
+    """
+    High-level API bootstrapping InstagramAPI-python and InstagramScraper
+        1: https://github.com/LevPasha/Instagram-API-python
+        2: https://github.com/rarcega/instagram-scraper
+    """
 
     def __init__(self, id, username, password):
         self.id = id
@@ -33,18 +39,12 @@ class ScraperBot():
                 print("Could not log in")
                 quit()
 
+    def _get_user_info(self, username):
+        url = "https://www.instagram.com/{0}?__a=1".format(username)
+        resp = self.scraper.get_json(url)
+        if resp is None:
+            print('Error getting user info for {0}'.format(username))
+            return
 
-if __name__ == "__main__":
-    bots = []
-    with open('.credentials.json') as creds:
-        credentials = json.load(creds)
-    for index, credential in enumerate(credentials):
-        bots.append(ScraperBot(
-            index+1,
-            credential['username'],
-            credential['password']
-        ))
-
-    # bot1.proxy_server.change_ip_address()
-    # for bot in bots:
-    #     bot.proxy_server.close()
+        user_info = json.loads(resp)['graphql']['user']
+        return user_info
