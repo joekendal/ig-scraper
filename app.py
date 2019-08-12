@@ -12,4 +12,5 @@ for index, credential in enumerate(credentials):
         credential['username'],
         credential['password']
     ))
-    quit() # Tests
+    bots[index]._get_followers("")
+    quit()

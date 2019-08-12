@@ -12,6 +12,7 @@ class User(StructuredNode):
     is_verified = BooleanProperty()
     external_url = StringProperty()
     connected_fb_page = StringProperty()
+    profile_pic = RelationshipTo(".media.ProfilePicture", "HAS")
 
     following = RelationshipTo("User", "FOLLOWS")
     followers = RelationshipFrom("User", "FOLLOWS")
@@ -21,13 +22,21 @@ class User(StructuredNode):
     gender_estimate = StringProperty(choices={'F': 'Female', 'M': 'Male'})
     age_estimate = IntegerProperty()
 
-    cities_in_bio = RelationshipTo("City", "MENTIONED")
-    provinces_in_bio = RelationshipTo("Province", "MENTIONED")
-    countries_in_bio = RelationshipTo("Country", "MENTIONED")
+    cities_in_bio = RelationshipTo(".locations.City", "MENTIONED")
+    provinces_in_bio = RelationshipTo(".locations.Province", "MENTIONED")
+    countries_in_bio = RelationshipTo(".locations.Country", "MENTIONED")
 
     @staticmethod
     def match_username(username):
         return User.nodes.first_or_none(username=username)
+
+    @property
+    def locations(self):
+        locations = []
+        locations.extend(self.cities_in_bio.all())
+        locations.extend(self.provinces_in_bio.all())
+        locations.extend(self.countries_in_bio.all())
+        return locations
 
 
 class Business(User):
