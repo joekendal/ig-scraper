@@ -17,6 +17,5 @@ class Picture(StructuredNode):
     # comments = RelationshipFrom('.interactions.Comment', 'ON')
 
 class ProfilePicture(Picture):
-    profile_pic_id = StringProperty()
     profile_pic_url = StringProperty()
     profile_pic_url_hd = StringProperty()

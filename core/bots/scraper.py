@@ -117,7 +117,6 @@ class ScraperBot():
                 ).save()
                 if follower['has_anonymous_profile_picture'] is False:
                     local.new_profile_pic = ProfilePicture(
-                        profile_pic_id=follower.get('profile_pic_id', None),
                         profile_pic_url=follower['profile_pic_url']
                     ).save()
                     local.new_user.profile_pic.connect(local.new_profile_pic)
