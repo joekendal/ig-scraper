@@ -59,7 +59,7 @@ class InstagramAPI:
     # rank_token          # Rank token
     # IGDataPath          # Data storage path
 
-    def __init__(self, proxies, username, password, debug=False, IGDataPath=None):
+    def __init__(self, proxies, username, password, log, debug=False, IGDataPath=None):
         m = hashlib.md5()
         m.update(username.encode('utf-8') + password.encode('utf-8'))
         self.device_id = self.generateDeviceId(m.hexdigest())
@@ -69,6 +69,7 @@ class InstagramAPI:
         self.id = id
         self.s = requests.session()
         self.s.proxies = proxies
+        self.log = log
         # print(self.s.get("https://ipinfo.io/ip").content.decode('utf-8'))
 
 
@@ -100,7 +101,7 @@ class InstagramAPI:
                     #self.timelineFeed()
                     #self.getv2Inbox()
                     #self.getRecentActivity()
-                    print("Login success!\n")
+                    self.log.info("Login success!")
 
     def syncFeatures(self):
         data = json.dumps({'_uuid': self.uuid,

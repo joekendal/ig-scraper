@@ -1,10 +1,12 @@
-import boto3, subprocess, time, atexit
+import boto3, subprocess, time, atexit, logging
 from botocore.exceptions import ClientError
 
 
+
 class EC2Proxy:
-    def __init__(self, id: int):
+    def __init__(self, id: int, log: object):
         self.id = id
+        self.log = logging.getLogger(__name__)
         self.ec2 = ec2 = boto3.client('ec2')
         self.instanceID = self.__get_ec2_instance(self.id)
         self.ssh = None
@@ -18,7 +20,7 @@ class EC2Proxy:
 
     def __open_ssh_tunnel(self, ip):
         if self.ssh: self.__close_ssh_tunnel()
-        print(f'Opening SSH tunnel to {ip}')
+        self.log.info(f'Opening SSH tunnel to {ip}')
         self.ssh = subprocess.Popen([
             "ssh", "-D", str(self.id + 1080), "-CqN",
             "-i", "~/.ssh/igscraper.pem",
@@ -43,7 +45,7 @@ class EC2Proxy:
             return address[0]['PublicIp']
 
     def __close_ssh_tunnel(self):
-        print("Closing SSH tunnel")
+        self.log.info("Closing SSH tunnel")
         self.ssh.terminate()
 
     def __get_ec2_instance(self, id):
@@ -108,7 +110,7 @@ class EC2Proxy:
             )
 
             instanceID = instance['Instances'][0]['InstanceId']
-            print("Starting new EC2 instance...")
+            self.log.info("Starting new EC2 instance...")
             time.sleep(60)
             return instanceID
 

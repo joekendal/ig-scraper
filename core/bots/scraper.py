@@ -1,6 +1,7 @@
-import threading, logging, time, sys, os, json, datetime, queue
+import threading, logging, time, sys, os, json, datetime, atexit, logging
+import redis
 
-from core import threaded
+from core import threaded, colours
 
 from core.api.InstagramAPI import InstagramAPI
 from core.api.InstagramScraper import InstagramScraper
@@ -18,17 +19,21 @@ class ScraperBot():
 
     def __init__(self, id, username, password):
         self.id = id
-        self.proxy_server = EC2Proxy(id=self.id)
+        self.username = username
+        self.log = logging.getLogger(__name__)
+
+        self.proxy_server = EC2Proxy(id=self.id, log=self.log)
         proxies = dict(http=f'socks5h://127.0.0.1:{self.id+1080}',
                        https=f'socks5h://127.0.0.1:{self.id+1080}')
 
-        self.api = InstagramAPI(proxies=proxies, username=username, password=password)
-        self.scraper = InstagramScraper(proxies=proxies, login_user=username, login_pass=password)
+        self.api = InstagramAPI(proxies=proxies, username=username, password=password, log=self.log)
+        self.scraper = InstagramScraper(proxies=proxies, login_user=username, login_pass=password, log=self.log)
         self.__login()
 
-        # List of new users to complete metadata on.
-        self._queue = queue.Queue()
+        self.quit = False
+        atexit.register(self.terminate)
         self.lock = threading.RLock
+        self.r = redis.Redis(db=0)
         self.__process_queue()
 
 
@@ -37,17 +42,17 @@ class ScraperBot():
         Attempts to log in from proxy. If it fails then retry
         from new IP address. If second attempt fails, quits.
         """
-        print("Logging in...")
+        self.log.info(f"Logging in {self.username}...")
         self.api.login()
         self.scraper.authenticate_with_login()
         if not self.api.isLoggedIn or not self.scraper.logged_in:
-            print("Changing IP address")
+            self.log.warning("Changing IP address")
             self.proxy_server.change_ip_address()
             time.sleep(3)
             self.api.login()
             self.scraper.authenticate_with_login()
             if not self.api.isLoggedIn or not self.scraper.logged_in:
-                print("Could not log in")
+                self.log.critical("Could not log in")
                 quit()
 
     def __get_user_info(self, username):
@@ -60,7 +65,7 @@ class ScraperBot():
         url = "https://www.instagram.com/{0}?__a=1".format(username)
         resp = self.scraper.get_json(url)
         if resp is None:
-            print('Error getting user info for {0}'.format(username))
+            self.log.error('Error getting user info for {0}'.format(username))
             return
 
         user_info = json.loads(resp)['graphql']['user']
@@ -78,11 +83,12 @@ class ScraperBot():
             user_id = user.user_id
         else:
             with self.lock(): # IMPORTANT! Pause queue processing thread
-                print("INTERUPT lock!")
+                #print("INTERUPT lock!")
                 user = self._scrape_user(username, returns="user_id")
                 user_id = user.user_id
-                print("LOCK CLOSED")
+                #print("LOCK CLOSED")
 
+        self.log.info("Getting followers")
         followers = []
         next_max_id = True
         while next_max_id:
@@ -121,10 +127,12 @@ class ScraperBot():
                     ).save()
                     local.new_user.profile_pic.connect(local.new_profile_pic)
                 local.new_user.following.connect(user)
-                # Add new user to metadata scrape queue
-                def f(username):
-                    return lambda: self._scrape_user("%s" % username)
-                self._queue.put(f(follower['username']))
+                local.data = {
+                    'scrape_type': 'basic',
+                    'username': local.new_user.username
+                }
+                self.r.rpush('queue:scrape', json.dumps(local.data))
+
             else:
                 local.found.following.connect(user)
 
@@ -138,7 +146,7 @@ class ScraperBot():
         `Optional`
         :param str  returns     User graphql attribute to return
         """
-        print("\tScraping user %s" % username)
+        self.log.info(f"Scraping user {username}")
         user_info = self.__get_user_info(username)
         user = User.match_username(username) or Business.match_username(username)
         if not user:
@@ -183,10 +191,13 @@ class ScraperBot():
     @threaded
     def __process_queue(self):
         while True:
-            print("Process queue:")
-            f = self._queue.get()
-            if f is None: break
-            f()
+            if self.quit is True: break
+            packed = self.r.blpop(['queue:scrape'], 30)
+            if not packed:
+                continue
+            data = json.loads(packed[1])
+            if data['scrape_type'] == 'basic':
+                self._scrape_user(data['username'])
 
     def terminate(self):
-        self._queue.put(None)
+        self.quit = True

@@ -89,7 +89,7 @@ class InstagramScraper(object):
                             media_types=['image', 'video', 'story-image', 'story-video'],
                             tag=False, location=False, search_location=False, comments=False,
                             verbose=0, include_location=False, filter=None, proxies={}, no_check_certificate=False,
-                                                        template='{urlname}')
+                                                        template='{urlname}', log=None)
 
         allowed_attr = list(default_attr.keys())
         default_attr.update(kwargs)
@@ -116,7 +116,7 @@ class InstagramScraper(object):
             self.latest = True
 
         # Set up a logger
-        self.logger = InstagramScraper.get_logger(level=logging.DEBUG, verbose=default_attr.get('verbose'))
+        self.logger = self.log
 
         self.posts = []
 
