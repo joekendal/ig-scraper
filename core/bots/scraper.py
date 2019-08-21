@@ -1,5 +1,7 @@
-import threading, logging, time, sys, os, json, datetime, atexit, logging
+import threading, logging, time, sys, os, json, datetime, atexit, logging, requests
 import redis
+
+from neomodel import db
 
 from core import threaded, colours
 
@@ -10,50 +12,11 @@ from core.api.AWS import EC2Proxy
 from core.db.models import User, Business, ProfilePicture
 
 
-class ScraperBot():
-    """
-    High-level API bootstrapping InstagramAPI-python and InstagramScraper
-        1: https://github.com/LevPasha/Instagram-API-python
-        2: https://github.com/rarcega/instagram-scraper
-    """
-
-    def __init__(self, id, username, password):
+class GuestScraperBot():
+    def __init__(self, id, logger):
         self.id = id
-        self.username = username
-        self.log = logging.getLogger(__name__)
-
-        self.proxy_server = EC2Proxy(id=self.id, log=self.log)
-        proxies = dict(http=f'socks5h://127.0.0.1:{self.id+1080}',
-                       https=f'socks5h://127.0.0.1:{self.id+1080}')
-
-        self.api = InstagramAPI(proxies=proxies, username=username, password=password, log=self.log)
-        self.scraper = InstagramScraper(proxies=proxies, login_user=username, login_pass=password, log=self.log)
-        self.__login()
-
-        self.quit = False
-        atexit.register(self.terminate)
-        self.lock = threading.RLock
-        self.r = redis.Redis(db=0)
-        self.__process_queue()
-
-
-    def __login(self):
-        """
-        Attempts to log in from proxy. If it fails then retry
-        from new IP address. If second attempt fails, quits.
-        """
-        self.log.info(f"Logging in {self.username}...")
-        self.api.login()
-        self.scraper.authenticate_with_login()
-        if not self.api.isLoggedIn or not self.scraper.logged_in:
-            self.log.warning("Changing IP address")
-            self.proxy_server.change_ip_address()
-            time.sleep(3)
-            self.api.login()
-            self.scraper.authenticate_with_login()
-            if not self.api.isLoggedIn or not self.scraper.logged_in:
-                self.log.critical("Could not log in")
-                quit()
+        self.type = "Guest"
+        self.log = logger
 
     def __get_user_info(self, username):
         """
@@ -63,13 +26,118 @@ class ScraperBot():
         :param str username     Instagram username
         """
         url = "https://www.instagram.com/{0}?__a=1".format(username)
-        resp = self.scraper.get_json(url)
-        if resp is None:
-            self.log.error('Error getting user info for {0}'.format(username))
-            return
 
-        user_info = json.loads(resp)['graphql']['user']
-        return user_info
+    def _scrape_user(self, username, returns=False):
+        """
+        Task must not be added to queue or consumer thread must be
+        locked to prevent wrong data stored in self.scraper.get result
+        `Required`
+        :param str  username    Instagram username
+        `Optional`
+        :param str  returns     User graphql attribute to return
+        """
+        self.log.info(f"Scraping user {username}")
+
+        user_info = self.__get_user_info(username)
+
+        if not user_info:
+            self.log.info(f"No user data found for @{username}")
+            return
+        with db.read_transaction:
+            user = User.match_username(username) or Business.match_username(username)
+        if not user:
+            # Create new user
+            if user_info['is_business_account'] is False:
+                with db.write_transaction:
+                    user = User(user_id=user_info['id'], full_name=user_info['full_name'],
+                            username=username, bio=user_info['biography'],
+                            external_url=user_info['external_url'],
+                            is_private=user_info['is_private'],
+                            connected_fb_page=user_info['connected_fb_page'],
+                            last_scraped_timestamp=datetime.datetime.utcnow()
+                            ).save()
+            else:
+                with db.write_transaction:
+                    user = Business(external_url=user_info['external_url'],
+                        business_category_name=user_info['business_category_name'],
+                        user_id=user_info['id'], username=username, bio=user_info['biography'],
+                        full_name=user_info['full_name'], is_private=user_info['is_private'],
+                        connected_fb_page=user_info['connected_fb_page'],
+                        last_scraped_timestamp=datetime.datetime.utcnow()
+                    ).save()
+        else:
+            with db.write_transaction:
+                # Update user records
+                user.bio = user_info['biography']
+                user.external_url = user_info['external_url']
+                user.connected_fb_page = user_info['connected_fb_page'],
+                user.last_scraped_timestamp=datetime.datetime.utcnow()
+                if user_info['is_business_account']:
+                    user.business_category_name = user_info['business_category_name']
+                user.save()
+
+        # Add profile picture if URL isn't saved
+        with db.read_transaction:
+            profile_pic_found = user.profile_pic.search(profile_pic_url=user_info['profile_pic_url'])
+        if not profile_pic_found:
+            with db.write_transaction:
+                profile_picture = ProfilePicture(
+                    profile_pic_url = user_info['profile_pic_url'],
+                    profile_pic_url_hd = user_info['profile_pic_url_hd']
+                ).save()
+                user.profile_pic.connect(profile_picture)
+
+        if returns:
+            return user
+
+
+class AuthScraperBot():
+    """
+    High-level API bootstrapping InstagramAPI-python and InstagramScraper
+        1: https://github.com/LevPasha/Instagram-API-python
+    """
+
+    def __init__(self, id, username=None, password=None):
+        self.id = id
+        self.type = "Auth"
+        self.username = username
+        self.log = logging.getLogger(__name__)
+
+        self.proxy_server = EC2Proxy(id=self.id, log=self.log)
+        self.proxies = dict(http=f'socks5h://127.0.0.1:{self.id+1080}',
+                       https=f'socks5h://127.0.0.1:{self.id+1080}')
+
+        self.api = InstagramAPI(proxies=self.proxies, username=username, password=password, log=self.log)
+        self._api_busy = False
+
+        #self.scraper = InstagramScraper(proxies=self.proxies, login_user=username, login_pass=password, log=self.log)
+        self.__authenticate()
+
+        self.quit = False
+        atexit.register(self.terminate)
+        self.lock = threading.RLock
+        self.r = redis.Redis(db=0)
+
+        self.__process_queue()
+
+
+    def __rotate_ec2(self):
+        self.log.warning("Changing IP address")
+        self.proxy_server.change_ip_address()
+        time.sleep(3)
+
+    def __authenticate(self):
+        """
+        Attempts to log in from proxy. If it fails then retry
+        from new IP address. If second attempt fails, quits.
+        """
+        self.log.info(f"Logging in {self.username}...")
+        try:
+            self.api.login()
+        except:
+            self.log.critical(f"Could not authenticate")
+            self.terminate()
+            quit()
 
     def _get_followers(self, username):
         """
@@ -78,7 +146,8 @@ class ScraperBot():
         `Required`
         :param str username     Instagram username
         """
-        user = User.match_username(username) or Business.match_username(username)
+        with db.read_transaction:
+            user = User.match_username(username) or Business.match_username(username)
         if user:
             user_id = user.user_id
         else:
@@ -89,6 +158,7 @@ class ScraperBot():
                 #print("LOCK CLOSED")
 
         self.log.info("Getting followers")
+        self._api_busy = True
         followers = []
         next_max_id = True
         while next_max_id:
@@ -100,6 +170,7 @@ class ScraperBot():
             followers.extend(result)
             self._add_followers(user, result)
             next_max_id = self.api.LastJson.get('next_max_id', '')
+        self._api_busy = False
 
         return followers
 
@@ -114,90 +185,105 @@ class ScraperBot():
         """
         local = threading.local()
         for follower in followers:
-            local.found = User.match_username(follower['username']) or Business.match_username(follower['username'])
+            with db.read_transaction:
+                local.found = User.match_username(follower['username']) or Business.match_username(follower['username'])
             if not local.found:
-                local.new_user = User(
-                    user_id=follower['pk'], is_private=follower['is_private'],
-                    full_name=follower['full_name'], username=follower['username'],
-                    is_verified=follower['is_verified']
-                ).save()
-                if follower['has_anonymous_profile_picture'] is False:
-                    local.new_profile_pic = ProfilePicture(
-                        profile_pic_url=follower['profile_pic_url']
+                with db.write_transaction:
+                    local.new_user = User(
+                        user_id=follower['pk'], is_private=follower['is_private'],
+                        full_name=follower['full_name'], username=follower['username'],
+                        is_verified=follower['is_verified']
                     ).save()
-                    local.new_user.profile_pic.connect(local.new_profile_pic)
-                local.new_user.following.connect(user)
+                if follower['has_anonymous_profile_picture'] is False:
+                    with db.write_transaction:
+                        local.new_profile_pic = ProfilePicture(
+                            profile_pic_url=follower['profile_pic_url']
+                        ).save()
+                        local.new_user.profile_pic.connect(local.new_profile_pic)
+                with db.write_transaction:
+                    local.new_user.following.connect(user)
                 local.data = {
                     'scrape_type': 'basic',
                     'username': local.new_user.username
                 }
                 self.r.rpush('queue:scrape', json.dumps(local.data))
-
+                local.data = {
+                    'scrape_type': 'following',
+                    'username': local.new_user.username
+                }
+                self.r.rpush('queue:auth_scrape', json.dumps(local.data))
             else:
-                local.found.following.connect(user)
+                with db.transaction:
+                    local.found.following.connect(user)
 
-
-    def _scrape_user(self, username, returns=False):
-        """
-        Task must not be added to queue or consumer thread must be
-        locked to prevent wrong data stored in self.scraper.get result
-        `Required`
-        :param str  username    Instagram username
-        `Optional`
-        :param str  returns     User graphql attribute to return
-        """
-        self.log.info(f"Scraping user {username}")
-        user_info = self.__get_user_info(username)
-        user = User.match_username(username) or Business.match_username(username)
-        if not user:
-            # Create new user
-            if user_info['is_business_account'] is False:
-                user = User(user_id=user_info['id'], full_name=user_info['full_name'],
-                        username=username, bio=user_info['biography'],
-                        external_url=user_info['external_url'],
-                        is_private=user_info['is_private'],
-                        connected_fb_page=user_info['connected_fb_page'],
-                        last_scraped_timestamp=datetime.datetime.utcnow()
-                        ).save()
-            else:
-                user = Business(external_url=user_info['external_url'],
-                    business_category_name=user_info['business_category_name'],
-                    user_id=user_info['id'], username=username, bio=user_info['biography'],
-                    full_name=user_info['full_name'], is_private=user_info['is_private'],
-                    connected_fb_page=user_info['connected_fb_page'],
-                    last_scraped_timestamp=datetime.datetime.utcnow()
-                ).save()
+    def _get_following(self, username):
+        with db.read_transaction:
+            user = User.match_username(username) or Business.match_username(username)
+        if user:
+            user_id = user.user_id
         else:
-            # Update user records
-            user.bio = user_info['biography']
-            user.external_url = user_info['external_url']
-            user.connected_fb_page = user_info['connected_fb_page'],
-            user.last_scraped_timestamp=datetime.datetime.utcnow()
-            if user_info['is_business_account']:
-                user.business_category_name = user_info['business_category_name']
-            user.save()
+            with self.lock():
+                user = self._scrape_user(username, returns="user_id")
+                user_id = user.user_id
+        self.log.info(f"Getting {username}'s following")
+        self._api_busy = True
+        following = []
+        next_max_id = True
+        while next_max_id:
+            if next_max_id is True: next_max_id = ''
+            _ = self.api.getUserFollowings(user_id, maxid=next_max_id)
+            result = self.api.LastJson.get('users', [])
+            following.extend(result)
+            self._add_following(user, result)
+            next_max_id = self.api.LastJson.get('next_max_id', '')
+        self._api_busy = False
 
-        # Add profile picture if URL isn't saved
-        if not user.profile_pic.search(profile_pic_url=user_info['profile_pic_url']):
-            profile_picture = ProfilePicture(
-                profile_pic_url = user_info['profile_pic_url'],
-                profile_pic_url_hd = user_info['profile_pic_url_hd']
-            ).save()
-            user.profile_pic.connect(profile_picture)
-
-        if returns:
-            return user
+    @threaded
+    def _add_following(self, of_user, following):
+        local = threading.local()
+        for user in following:
+            with db.read_transaction:
+                local.found = User.match_username(user['username']) or Business.match_username(user['username'])
+            if not local.found:
+                with db.write_transaction:
+                    local.new_user = User(
+                        user_id=user['pk'], is_private=user['is_private'],
+                        full_name=user['full_name'], username=user['username'],
+                        is_verified=user['is_verified']
+                    ).save()
+                if user['has_anonymous_profile_picture'] is False:
+                    with db.write_transaction:
+                        local.new_profile_pic = ProfilePicture(
+                            profile_pic_url=user['profile_pic_url']
+                        ).save()
+                        local.new_user.profile_pic.connect(local.new_profile_pic)
+                with db.write_transaction:
+                    local.new_user.followers.connect(of_user)
+                local.data = {
+                    'scrape_type': 'basic',
+                    'username': local.new_user.username
+                }
+                self.r.rpush('queue:scrape', json.dumps(local.data))
+            else:
+                with db.write_transaction:
+                    local.found.followers.connect(of_user)
 
     @threaded
     def __process_queue(self):
         while True:
             if self.quit is True: break
-            packed = self.r.blpop(['queue:scrape'], 30)
-            if not packed:
+            if self._api_busy is True:
+                time.sleep(1)
                 continue
+            packed = self.r.blpop(['queue:auth_scrape'], 30)
+            if not packed: continue
             data = json.loads(packed[1])
-            if data['scrape_type'] == 'basic':
-                self._scrape_user(data['username'])
+            if data['scrape_type'] == 'following':
+                try:
+                    self._get_following(data['username'])
+                except Exception as e:
+                    self.log.exception(e)
+                    self.r.rpush('queue:auth_scrape', json.dumps(data))
 
     def terminate(self):
         self.quit = True

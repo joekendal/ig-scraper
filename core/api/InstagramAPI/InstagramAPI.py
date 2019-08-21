@@ -34,7 +34,7 @@ except:
     # Issue 159, python3 import fix
     from .ImageUtils import getImageSize
 
-from .exceptions import SentryBlockException
+from .exceptions import SentryBlockException, CheckpointChallengeException
 
 
 class InstagramAPI:
@@ -961,8 +961,14 @@ class InstagramAPI:
 
         if response.status_code == 200:
             self.LastResponse = response
-            self.LastJson = json.loads(response.text)
-            return True
+            try:
+                self.LastJson = json.loads(response.text)
+            except Exception as e:
+                self.log.exception(e)
+                self.log.debug(response.text)
+                return False
+            else:
+                return True
         else:
             print("Request return " + str(response.status_code) + " error!")
             # for debugging
@@ -970,9 +976,14 @@ class InstagramAPI:
                 self.LastResponse = response
                 self.LastJson = json.loads(response.text)
                 print(self.LastJson)
-                if 'error_type' in self.LastJson and self.LastJson['error_type'] == 'sentry_block':
-                    raise SentryBlockException(self.LastJson['message'])
+                if 'error_type' in self.LastJson:
+                    if self.LastJson['error_type'] == 'sentry_block':
+                        raise SentryBlockException(self.LastJson['message'])
+                    if self.LastJson['error_type'] == 'checkpoint_challenge_required':
+                        raise CheckpointChallengeException()
             except SentryBlockException:
+                raise
+            except CheckpointChallengeException:
                 raise
             except:
                 pass
