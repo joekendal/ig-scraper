@@ -1,6 +1,7 @@
 from neomodel import (StructuredNode, StringProperty, IntegerProperty,
                       RelationshipTo, BooleanProperty, DateTimeProperty,
                       RelationshipFrom)
+from .media import PostRel
 
 
 class User(StructuredNode):
@@ -16,15 +17,27 @@ class User(StructuredNode):
 
     following = RelationshipTo("User", "FOLLOWS")
     followers = RelationshipFrom("User", "FOLLOWS")
+    edge_following_count = IntegerProperty()
+    edge_followers_count = IntegerProperty()
 
     last_scraped_timestamp = DateTimeProperty()
 
     gender_estimate = StringProperty(choices={'F': 'Female', 'M': 'Male'})
     age_estimate = IntegerProperty()
 
+    country_block = BooleanProperty()
+    has_channel = BooleanProperty()
+    joined_recently = BooleanProperty()
+    edge_timeline_media_count = IntegerProperty()
+
     cities_in_bio = RelationshipTo(".locations.City", "MENTIONED")
     provinces_in_bio = RelationshipTo(".locations.Province", "MENTIONED")
     countries_in_bio = RelationshipTo(".locations.Country", "MENTIONED")
+
+    picture_posts = RelationshipTo('.media.Picture', "POSTED", model=PostRel)
+    carousel_posts = RelationshipTo('.media.Sidecar', "POSTED", model=PostRel)
+    video_posts = RelationshipTo('.media.Video', "POSTED", model=PostRel)
+    igtv_posts = RelationshipTo('.media.IGTV', "POSTED", model=PostRel)
 
     @staticmethod
     def match_username(username):
@@ -37,6 +50,15 @@ class User(StructuredNode):
         locations.extend(self.provinces_in_bio.all())
         locations.extend(self.countries_in_bio.all())
         return locations
+
+    @property
+    def posts(self):
+        posts = []
+        posts.extend(self.picture_posts.all())
+        posts.extend(self.carousel_posts.all())
+        posts.extend(self.video_posts.all())
+        posts.extend(self.igtv_posts.all())
+        return posts
 
 
 class Business(User):

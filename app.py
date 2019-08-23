@@ -1,5 +1,5 @@
-import json, logging, datetime
-from core.bots import ScraperBot
+import json, logging, datetime, os, redis
+from core.bots import AuthScraperBot
 
 format = "%(asctime)s [%(name)s:%(threadName)s] - %(levelname)s: %(message)s"
 logging.basicConfig(filename="app.log",
@@ -14,18 +14,27 @@ bots = []
 with open('.credentials.json') as creds:
     credentials = json.load(creds)
 
-# for index, credential in enumerate(credentials):
-#     logger.info(f"Creating Bot-{index+1}")
-#     bots.append(ScraperBot(
-#         index+1,
-#         credential['username'],
-#         credential['password']
-#     ))
-
-for i in range(1):
-    logger.info(f"Creating Bot-{i+1}")
-    bots.append(ScraperBot(
-        i+1
+for index, credential in enumerate(credentials):
+    logger.info(f"Creating Bot-{index+1}")
+    bots.append(AuthScraperBot(
+        index+1,
+        credential['username'],
+        credential['password']
     ))
 
-#bots[1]._get_followers("fannyamandanilsson")
+# for i in range(1):
+#     logger.info(f"Creating GuestBot-{i+1}")
+#     bots.append(GuestScraperBot(
+#         i+1,
+#         os.environ.get('SCRAPER_API_KEY')
+#     ))
+def add_followers(username):
+    r = redis.Redis(db=0)
+    data = {
+        'scrape_type': 'followers',
+        'username': username
+    }
+    r.lpush('queue:scrape', json.dumps(data))
+
+
+#add_followers('fannyamandanilsson')

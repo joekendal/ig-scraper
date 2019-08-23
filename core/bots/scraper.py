@@ -1,108 +1,30 @@
-import threading, logging, time, sys, os, json, datetime, atexit, logging, requests
+import threading, logging, time, sys, os, json, datetime, atexit, logging, requests, datetime
 import redis
 
 from neomodel import db
 
-from core import threaded, colours
-
+from core import colours
+from core.bots import threaded
 from core.api.InstagramAPI import InstagramAPI
 from core.api.InstagramScraper import InstagramScraper
 from core.api.AWS import EC2Proxy
 
-from core.db.models import User, Business, ProfilePicture
-
-
-class GuestScraperBot():
-    def __init__(self, id, logger):
-        self.id = id
-        self.type = "Guest"
-        self.log = logger
-
-    def __get_user_info(self, username):
-        """
-        Uses scraper to get user metadata from
-        the public Instagram API (Facebook GraphQL).
-        `Required`
-        :param str username     Instagram username
-        """
-        url = "https://www.instagram.com/{0}?__a=1".format(username)
-
-    def _scrape_user(self, username, returns=False):
-        """
-        Task must not be added to queue or consumer thread must be
-        locked to prevent wrong data stored in self.scraper.get result
-        `Required`
-        :param str  username    Instagram username
-        `Optional`
-        :param str  returns     User graphql attribute to return
-        """
-        self.log.info(f"Scraping user {username}")
-
-        user_info = self.__get_user_info(username)
-
-        if not user_info:
-            self.log.info(f"No user data found for @{username}")
-            return
-        with db.read_transaction:
-            user = User.match_username(username) or Business.match_username(username)
-        if not user:
-            # Create new user
-            if user_info['is_business_account'] is False:
-                with db.write_transaction:
-                    user = User(user_id=user_info['id'], full_name=user_info['full_name'],
-                            username=username, bio=user_info['biography'],
-                            external_url=user_info['external_url'],
-                            is_private=user_info['is_private'],
-                            connected_fb_page=user_info['connected_fb_page'],
-                            last_scraped_timestamp=datetime.datetime.utcnow()
-                            ).save()
-            else:
-                with db.write_transaction:
-                    user = Business(external_url=user_info['external_url'],
-                        business_category_name=user_info['business_category_name'],
-                        user_id=user_info['id'], username=username, bio=user_info['biography'],
-                        full_name=user_info['full_name'], is_private=user_info['is_private'],
-                        connected_fb_page=user_info['connected_fb_page'],
-                        last_scraped_timestamp=datetime.datetime.utcnow()
-                    ).save()
-        else:
-            with db.write_transaction:
-                # Update user records
-                user.bio = user_info['biography']
-                user.external_url = user_info['external_url']
-                user.connected_fb_page = user_info['connected_fb_page'],
-                user.last_scraped_timestamp=datetime.datetime.utcnow()
-                if user_info['is_business_account']:
-                    user.business_category_name = user_info['business_category_name']
-                user.save()
-
-        # Add profile picture if URL isn't saved
-        with db.read_transaction:
-            profile_pic_found = user.profile_pic.search(profile_pic_url=user_info['profile_pic_url'])
-        if not profile_pic_found:
-            with db.write_transaction:
-                profile_picture = ProfilePicture(
-                    profile_pic_url = user_info['profile_pic_url'],
-                    profile_pic_url_hd = user_info['profile_pic_url_hd']
-                ).save()
-                user.profile_pic.connect(profile_picture)
-
-        if returns:
-            return user
+from core.db.models import (User, Business, ProfilePicture, Picture, Sidecar,
+                            Video, IGTV, Hashtag)
 
 
 class AuthScraperBot():
     """
     High-level API bootstrapping InstagramAPI-python and InstagramScraper
         1: https://github.com/LevPasha/Instagram-API-python
+        2: https://github.com/rarcega/instagram-scraper
     """
 
-    def __init__(self, id, username=None, password=None):
+    def __init__(self, id, username, password):
         self.id = id
         self.type = "Auth"
         self.username = username
         self.log = logging.getLogger(__name__)
-
         self.proxy_server = EC2Proxy(id=self.id, log=self.log)
         self.proxies = dict(http=f'socks5h://127.0.0.1:{self.id+1080}',
                        https=f'socks5h://127.0.0.1:{self.id+1080}')
@@ -110,14 +32,17 @@ class AuthScraperBot():
         self.api = InstagramAPI(proxies=self.proxies, username=username, password=password, log=self.log)
         self._api_busy = False
 
-        #self.scraper = InstagramScraper(proxies=self.proxies, login_user=username, login_pass=password, log=self.log)
-        self.__authenticate()
+        self.scraper = InstagramScraper(proxies=self.proxies, login_user=username, login_pass=password, log=self.log)
 
         self.quit = False
         atexit.register(self.terminate)
         self.lock = threading.RLock
         self.r = redis.Redis(db=0)
 
+        self.start()
+
+    def start(self):
+        self.__authenticate()
         self.__process_queue()
 
 
@@ -134,10 +59,162 @@ class AuthScraperBot():
         self.log.info(f"Logging in {self.username}...")
         try:
             self.api.login()
+            self.scraper.authenticate_with_login()
         except:
             self.log.critical(f"Could not authenticate")
             self.terminate()
             quit()
+
+    def __get_user_info(self, username):
+        """
+        Uses scraper to get user metadata from
+        the public Instagram endpoint (Facebook GraphQL).
+        `Required`
+        :param str username     Instagram username
+        """
+        url = "https://www.instagram.com/{0}/?__a=1".format(username)
+        resp = self.scraper.get_json(url)
+        if resp is None: return resp
+        user_info = json.loads(resp)['graphql']['user']
+        return user_info
+
+    def _scrape_user(self, username, mode='basic', returns=False):
+        """
+        Task must not be added to queue or consumer thread must be
+        locked to prevent wrong data stored in self.scraper.get result
+        `Required`
+        :param str  username    Instagram username
+        `Optional`
+        :param str  mode        Basic or deep scrape
+        :param bool  returns     User graphql attribute to return
+        """
+        self.log.info(f"Scraping user {username}")
+
+        user_info = self.__get_user_info(username)
+        if not user_info:
+            self.log.info(f"No user data found for @{username}")
+            return
+        with db.read_transaction:
+            user = User.match_username(username) or Business.match_username(username)
+        if not user:
+            # Create new user
+            if user_info['is_business_account'] is False:
+                if user_info['country_block'] is True:
+                    self.log.warning(f"@{username} has country block!")
+                with db.write_transaction:
+                    user = User(user_id=user_info['id'], full_name=user_info['full_name'],
+                            username=username, bio=user_info['biography'],
+                            external_url=user_info['external_url'],
+                            is_private=user_info['is_private'],
+                            connected_fb_page=user_info['connected_fb_page'],
+                            last_scraped_timestamp=datetime.datetime.utcnow(),
+                            edge_following_count=user_info['edge_follow']['count'],
+                            edge_followers_count=user_info['edge_followed_by']['count'],
+                            has_channel=user_info['has_channel'],
+                            country_block=user_info['country_block'],
+                            joined_recently=user_info['is_joined_recently'],
+                            edge_timeline_media_count=user_info['edge_owner_to_timeline_media']['count']
+                            ).save()
+            else:
+                with db.write_transaction:
+                    user = Business(external_url=user_info['external_url'],
+                        business_category_name=user_info['business_category_name'],
+                        user_id=user_info['id'], username=username, bio=user_info['biography'],
+                        full_name=user_info['full_name'], is_private=user_info['is_private'],
+                        connected_fb_page=user_info['connected_fb_page'],
+                        last_scraped_timestamp=datetime.datetime.utcnow(),
+                        edge_following_count=user_info['edge_follow']['count'],
+                        edge_followers_count=user_info['edge_followed_by']['count'],
+                        has_channel=user_info['has_channel'],
+                        country_block=user_info['country_block'],
+                        joined_recently=user_info['is_joined_recently'],
+                        edge_timeline_media_count=user_info['edge_owner_to_timeline_media']['count']
+                    ).save()
+        else:
+            # Update user records
+            user.bio = user_info['biography']
+            user.external_url = user_info['external_url']
+            user.connected_fb_page = user_info['connected_fb_page']
+            user.last_scraped_timestamp=datetime.datetime.utcnow()
+            user.edge_following_count=user_info['edge_follow']['count']
+            user.edge_followers_count=user_info['edge_followed_by']['count']
+            user.has_channel=user_info['has_channel']
+            user.country_block=user_info['country_block']
+            user.joined_recently=user_info['is_joined_recently']
+            if user_info['is_business_account']:
+                user.business_category_name = user_info['business_category_name']
+            with db.write_transaction:
+                user.save()
+
+        # Add profile picture if URL isn't saved
+        with db.read_transaction:
+            profile_pic_found = user.profile_pic.search(profile_pic_url=user_info['profile_pic_url'])
+        if not profile_pic_found:
+            with db.write_transaction:
+                profile_picture = ProfilePicture(
+                    profile_pic_url = user_info['profile_pic_url'],
+                    profile_pic_url_hd = user_info['profile_pic_url_hd']
+                ).save()
+                user.profile_pic.connect(profile_picture)
+
+        # Add graph media if not exists
+        for item in user_info['edge_owner_to_timeline_media']['edges']:
+            node = item['node']
+            with db.read_transaction:
+                if node['__typename'] == 'GraphImage':
+                    found = Picture.nodes.first_or_none(media_id=node['id'])
+                elif node['__typename'] == 'GraphVideo':
+                    if node.get('product_type', '') == 'igtv':
+                        found = IGTV.nodes.first_or_none(media_id=node['id'])
+                    else:
+                        found = Video.nodes.first_or_none(media_id=node['id'])
+                elif node['__typename'] == 'GraphSidecar':
+                    found = Sidecar.nodes.first_or_none(media_id=node['id'])
+
+            if found: break
+
+            if node['edge_media_to_caption']['edges']:
+                caption = node['edge_media_to_caption']['edges'][0]['node']['text']
+            else:
+                caption = None
+
+            hashtags = self.scraper.extract_tags(node).get('tags')
+
+            if node['__typename'] == 'GraphImage':
+                with db.write_transaction:
+                    taken_at = datetime.datetime.fromtimestamp(node['taken_at_timestamp'])
+                    new_media = Picture(
+                        media_id=node['id'],
+                        caption=caption,
+                        shortcode=node['shortcode'],
+                        edge_comments_count=node['edge_media_to_comment']['count'],
+                        comments_disabled=node['comments_disabled'],
+                        taken_at=taken_at,
+                        display_url=node['display_url'],
+                        edge_liked_by_count=node['edge_liked_by']['count'],
+                        location=node['location'],
+                        accessibility_caption=node['accessibility_caption']
+                    ).save()
+                    user.picture_posts.connect(new_media, {'on_timestamp': taken_at})
+            elif mode == 'deep' and node['__typename'] == 'GraphSidecar':
+                # TODO:
+                pass
+            elif mode == 'deep' and node['__typename'] == 'GraphVideo':
+                # TODO:
+                pass
+
+            if hashtags:
+                for hashtag in hashtags:
+                    with db.read_transaction:
+                        tag_object = Hashtag.nodes.first_or_none(name=hashtag)
+                    if not tag_object:
+                        with db.write_transaction:
+                            tag_object = Hashtag(name=hashtag).save()
+                    with db.write_transaction:
+                        new_media.hashtags.connect(tag_object)
+
+        if returns:
+            return user
 
     def _get_followers(self, username):
         """
@@ -146,16 +223,15 @@ class AuthScraperBot():
         `Required`
         :param str username     Instagram username
         """
+        self.log.info("Fetching followers for %s" % username)
         with db.read_transaction:
             user = User.match_username(username) or Business.match_username(username)
         if user:
             user_id = user.user_id
         else:
             with self.lock(): # IMPORTANT! Pause queue processing thread
-                #print("INTERUPT lock!")
                 user = self._scrape_user(username, returns="user_id")
                 user_id = user.user_id
-                #print("LOCK CLOSED")
 
         self.log.info("Getting followers")
         self._api_busy = True
@@ -211,7 +287,7 @@ class AuthScraperBot():
                     'scrape_type': 'following',
                     'username': local.new_user.username
                 }
-                self.r.rpush('queue:auth_scrape', json.dumps(local.data))
+                self.r.rpush('queue:scrape', json.dumps(local.data))
             else:
                 with db.transaction:
                     local.found.following.connect(user)
@@ -275,7 +351,7 @@ class AuthScraperBot():
             if self._api_busy is True:
                 time.sleep(1)
                 continue
-            packed = self.r.blpop(['queue:auth_scrape'], 30)
+            packed = self.r.blpop(['queue:scrape'], 30)
             if not packed: continue
             data = json.loads(packed[1])
             if data['scrape_type'] == 'following':
@@ -283,7 +359,20 @@ class AuthScraperBot():
                     self._get_following(data['username'])
                 except Exception as e:
                     self.log.exception(e)
-                    self.r.rpush('queue:auth_scrape', json.dumps(data))
+                    self.r.rpush('queue:scrape', json.dumps(data))
+            elif data['scrape_type'] == 'followers':
+                try:
+                    self._get_followers(data['username'])
+                except Exception as e:
+                    self.log.exception(e)
+                    #self.r.lpush('queue:scrape', json.dumps(data))
+
+            elif data['scrape_type'] in ['basic', 'deep']:
+                try:
+                    self._scrape_user(data['username'], mode=data['scrape_type'])
+                except Exception as e:
+                    self.log.exception(e)
+                    self.r.rpush('queue:scrape', json.dumps(data))
 
     def terminate(self):
         self.quit = True

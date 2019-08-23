@@ -6,3 +6,4 @@ config.MAX_POOL_SIZE = 50
 from .locations import *
 from .users import *
 from .media import *
+from .tags import *

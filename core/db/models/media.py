@@ -1,21 +1,53 @@
 from neomodel import (StructuredNode, IntegerProperty, StringProperty,
                       RelationshipFrom, DateTimeProperty, BooleanProperty,
-                      JSONProperty)
+                      JSONProperty, ArrayProperty, StructuredRel, RelationshipTo,
+                      FloatProperty)
+
+class PostRel(StructuredRel):
+    on_timestamp = DateTimeProperty()
 
 
-class Picture(StructuredNode):
-    media_id = IntegerProperty()
+class Media(StructuredNode):
+    media_id = IntegerProperty(unique_index=True)
     caption = StringProperty()
     taken_at = DateTimeProperty()
     comments_disabled = BooleanProperty()
     display_url = StringProperty()
+    shortcode = StringProperty()
 
     location = JSONProperty()
     accessibility_caption = StringProperty()
 
     liked_by = RelationshipFrom('.users.User', "LIKES")
     # comments = RelationshipFrom('.interactions.Comment', 'ON')
+    hashtags = RelationshipTo('.tags.Hashtag', "MENTIONED")
 
-class ProfilePicture(Picture):
+    edge_liked_by_count = IntegerProperty()
+    edge_comments_count = IntegerProperty()
+
+
+class Picture(Media):
+    __typename = "GraphImage"
+
+
+class ProfilePicture(StructuredNode):
+    __typename = "GraphImage"
     profile_pic_url = StringProperty()
     profile_pic_url_hd = StringProperty()
+
+
+class Sidecar(Media):
+    __typename = "GraphSidecar" # Carousel
+    urls = ArrayProperty()
+
+
+class Video(Media):
+    __typename = "GraphVideo"
+    url = StringProperty()
+    duration = FloatProperty()
+    view_count = IntegerProperty()
+
+
+class IGTV(Video):
+    product_type = "igtv"
+    title = StringProperty()

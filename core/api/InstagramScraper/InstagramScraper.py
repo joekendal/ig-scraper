@@ -267,6 +267,7 @@ class InstagramScraper(object):
                     self.logger.debug('Session error %(count)s: "%(error)s"' % locals())
             else:
                 self.logger.error(json.dumps(login_text))
+            raise
 
     def login_challenge(self, checkpoint_url):
         self.session.headers.update({'Referer': BASE_URL})
