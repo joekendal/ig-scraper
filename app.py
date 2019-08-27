@@ -22,12 +22,6 @@ for index, credential in enumerate(credentials):
         credential['password']
     ))
 
-# for i in range(1):
-#     logger.info(f"Creating GuestBot-{i+1}")
-#     bots.append(GuestScraperBot(
-#         i+1,
-#         os.environ.get('SCRAPER_API_KEY')
-#     ))
 def add_followers(username):
     r = redis.Redis(db=0)
     data = {

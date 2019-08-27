@@ -7,3 +7,4 @@ from .locations import *
 from .users import *
 from .media import *
 from .tags import *
+from .interactions import *

@@ -1,7 +1,8 @@
 from neomodel import (StructuredNode, StringProperty, IntegerProperty,
                       RelationshipTo, BooleanProperty, DateTimeProperty,
                       RelationshipFrom)
-from .media import PostRel
+from .media import PostRel, TaggedUserRel
+from .interactions import CommentRel
 
 
 class User(StructuredNode):
@@ -14,6 +15,7 @@ class User(StructuredNode):
     external_url = StringProperty()
     connected_fb_page = StringProperty()
     profile_pic = RelationshipTo(".media.ProfilePicture", "HAS")
+    has_anonymous_profile_pic = BooleanProperty()
 
     following = RelationshipTo("User", "FOLLOWS")
     followers = RelationshipFrom("User", "FOLLOWS")
@@ -21,6 +23,7 @@ class User(StructuredNode):
     edge_followers_count = IntegerProperty()
 
     last_scraped_timestamp = DateTimeProperty()
+    last_deep_scrape_timestamp = DateTimeProperty()
 
     gender_estimate = StringProperty(choices={'F': 'Female', 'M': 'Male'})
     age_estimate = IntegerProperty()
@@ -34,10 +37,14 @@ class User(StructuredNode):
     provinces_in_bio = RelationshipTo(".locations.Province", "MENTIONED")
     countries_in_bio = RelationshipTo(".locations.Country", "MENTIONED")
 
+    all_posts = RelationshipTo('.media.Media', "POSTED", model=PostRel)
     picture_posts = RelationshipTo('.media.Picture', "POSTED", model=PostRel)
     carousel_posts = RelationshipTo('.media.Sidecar', "POSTED", model=PostRel)
     video_posts = RelationshipTo('.media.Video', "POSTED", model=PostRel)
     igtv_posts = RelationshipTo('.media.IGTV', "POSTED", model=PostRel)
+
+    tagged_in = RelationshipFrom('.media.Media', "TAGGED_USER", model=TaggedUserRel)
+    comments = RelationshipTo('.interactions.Comment', "COMMENTED", model=CommentRel)
 
     @staticmethod
     def match_username(username):

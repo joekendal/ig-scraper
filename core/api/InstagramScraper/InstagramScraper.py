@@ -563,7 +563,7 @@ class InstagramScraper(object):
 
         details = None
         if self.include_location and 'location' not in node:
-            details = self.__get_media_details(node['shortcode'])
+            details = self._get_media_details(node['shortcode'])
             node['location'] = details.get('location') if details else None
 
         if 'urls' not in node:
@@ -575,7 +575,7 @@ class InstagramScraper(object):
             node['urls'] = [self.get_original_image(node['display_url'])]
         else:
             if details is None:
-                details = self.__get_media_details(node['shortcode'])
+                details = self._get_media_details(node['shortcode'])
 
             if details:
                 if '__typename' in details and details['__typename'] == 'GraphVideo':
@@ -590,7 +590,7 @@ class InstagramScraper(object):
 
         return node
 
-    def __get_media_details(self, shortcode):
+    def _get_media_details(self, shortcode):
         resp = self.get_json(VIEW_MEDIA_URL.format(shortcode))
 
         if resp is not None:
@@ -606,7 +606,7 @@ class InstagramScraper(object):
         code = item.get('shortcode', item.get('code'))
 
         if code:
-            details = self.__get_media_details(code)
+            details = self._get_media_details(code)
             item['location'] = details.get('location')
 
     def scrape(self, executor=concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DOWNLOADS)):

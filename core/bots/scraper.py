@@ -10,7 +10,7 @@ from core.api.InstagramScraper import InstagramScraper
 from core.api.AWS import EC2Proxy
 
 from core.db.models import (User, Business, ProfilePicture, Picture, Sidecar,
-                            Video, IGTV, Hashtag)
+                            Video, IGTV, Hashtag, Comment)
 
 
 class AuthScraperBot():
@@ -53,14 +53,14 @@ class AuthScraperBot():
 
     def __authenticate(self):
         """
-        Attempts to log in from proxy. If it fails then retry
-        from new IP address. If second attempt fails, quits.
+        Attempts to log in from proxy.
         """
         self.log.info(f"Logging in {self.username}...")
         try:
-            self.api.login()
             self.scraper.authenticate_with_login()
-        except:
+            self.api.login()
+        except Exception as e:
+            self.log.exception(e)
             self.log.critical(f"Could not authenticate")
             self.terminate()
             quit()
@@ -78,18 +78,16 @@ class AuthScraperBot():
         user_info = json.loads(resp)['graphql']['user']
         return user_info
 
-    def _scrape_user(self, username, mode='basic', returns=False):
+    def _scrape_user(self, username, returns=False):
         """
         Task must not be added to queue or consumer thread must be
         locked to prevent wrong data stored in self.scraper.get result
         `Required`
         :param str  username    Instagram username
         `Optional`
-        :param str  mode        Basic or deep scrape
         :param bool  returns     User graphql attribute to return
         """
         self.log.info(f"Scraping user {username}")
-
         user_info = self.__get_user_info(username)
         if not user_info:
             self.log.info(f"No user data found for @{username}")
@@ -98,39 +96,37 @@ class AuthScraperBot():
             user = User.match_username(username) or Business.match_username(username)
         if not user:
             # Create new user
-            if user_info['is_business_account'] is False:
-                if user_info['country_block'] is True:
-                    self.log.warning(f"@{username} has country block!")
+            user_kwargs = {
+                'user_id': user_info['id'],
+                'full_name': user_info['full_name'],
+                'username': username,
+                'bio': user_info['biography'],
+                'external_url': user_info['external_url'],
+                'is_private': user_info['is_private'],
+                'connected_fb_page': user_info['connected_fb_page'],
+                'last_scraped_timestamp': datetime.datetime.utcnow(),
+                'edge_following_count': user_info['edge_follow']['count'],
+                'edge_followers_count': user_info['edge_followed_by']['count'],
+                'has_channel': user_info['has_channel'],
+                'country_block': user_info['country_block'],
+                'joined_recently': user_info['is_joined_recently'],
+                'edge_timeline_media_count': user_info['edge_owner_to_timeline_media']['count']
+            }
+            if user_info['country_block'] is True:
+                self.log.warning(f"@{username} has country block!")
+            if user_info['is_business_account'] is True:
+                user_kwargs['business_category_name'] = user_info['business_category_name']
                 with db.write_transaction:
-                    user = User(user_id=user_info['id'], full_name=user_info['full_name'],
-                            username=username, bio=user_info['biography'],
-                            external_url=user_info['external_url'],
-                            is_private=user_info['is_private'],
-                            connected_fb_page=user_info['connected_fb_page'],
-                            last_scraped_timestamp=datetime.datetime.utcnow(),
-                            edge_following_count=user_info['edge_follow']['count'],
-                            edge_followers_count=user_info['edge_followed_by']['count'],
-                            has_channel=user_info['has_channel'],
-                            country_block=user_info['country_block'],
-                            joined_recently=user_info['is_joined_recently'],
-                            edge_timeline_media_count=user_info['edge_owner_to_timeline_media']['count']
-                            ).save()
+                    user = Business(**user_kwargs).save()
             else:
                 with db.write_transaction:
-                    user = Business(external_url=user_info['external_url'],
-                        business_category_name=user_info['business_category_name'],
-                        user_id=user_info['id'], username=username, bio=user_info['biography'],
-                        full_name=user_info['full_name'], is_private=user_info['is_private'],
-                        connected_fb_page=user_info['connected_fb_page'],
-                        last_scraped_timestamp=datetime.datetime.utcnow(),
-                        edge_following_count=user_info['edge_follow']['count'],
-                        edge_followers_count=user_info['edge_followed_by']['count'],
-                        has_channel=user_info['has_channel'],
-                        country_block=user_info['country_block'],
-                        joined_recently=user_info['is_joined_recently'],
-                        edge_timeline_media_count=user_info['edge_owner_to_timeline_media']['count']
-                    ).save()
+                    user = User(**user_kwargs).save()
         else:
+            if user.last_scraped_timestamp:
+                difference = datetime.utcnow() - user.last_scraped_timestamp
+                if difference.days < 7:
+                    self.log.warning(f"User {username} already scraped in last 7 days... Skipping")
+                    return
             # Update user records
             user.bio = user_info['biography']
             user.external_url = user_info['external_url']
@@ -178,43 +174,118 @@ class AuthScraperBot():
             else:
                 caption = None
 
-            hashtags = self.scraper.extract_tags(node).get('tags')
-
+            media_kwargs = {
+                'media_id': node['id'],
+                'caption': caption,
+                'shortcode': node['shortcode'],
+                'edge_comments_count': node['edge_media_to_comment'].get('count'),
+                'comments_disabled': node['comments_disabled'],
+                'display_url': node['display_url'],
+                'edge_liked_by_count': node['edge_liked_by']['count'],
+                'location': node['location'],
+                'accessibility_caption': node['accessibility_caption'],
+                'taken_at': datetime.datetime.fromtimestamp(node['taken_at_timestamp']),
+                'height': node['height'],
+                'width': node['width']
+            }
             if node['__typename'] == 'GraphImage':
                 with db.write_transaction:
-                    taken_at = datetime.datetime.fromtimestamp(node['taken_at_timestamp'])
-                    new_media = Picture(
-                        media_id=node['id'],
-                        caption=caption,
-                        shortcode=node['shortcode'],
-                        edge_comments_count=node['edge_media_to_comment']['count'],
-                        comments_disabled=node['comments_disabled'],
-                        taken_at=taken_at,
-                        display_url=node['display_url'],
-                        edge_liked_by_count=node['edge_liked_by']['count'],
-                        location=node['location'],
-                        accessibility_caption=node['accessibility_caption']
-                    ).save()
+                    new_media = Picture(**media_kwargs).save()
                     user.picture_posts.connect(new_media, {'on_timestamp': taken_at})
-            elif mode == 'deep' and node['__typename'] == 'GraphSidecar':
-                # TODO:
-                pass
-            elif mode == 'deep' and node['__typename'] == 'GraphVideo':
-                # TODO:
-                pass
+            elif node['__typename'] == 'GraphSidecar':
+                with db.write_transaction:
+                    new_media = Sidecar(**media_kwargs).save()
+                    user.carousel_posts.connect(new_media, {'on_timestamp': taken_at})
+            elif node['__typename'] == 'GraphVideo':
+                media_kwargs['view_count'] = node['video_view_count']
+                if node.get('product_type', '') == 'igtv':
+                    media_kwargs['title'] = node['title']
+                    media_kwargs['duration'] = node['video_duration']
+                    with db.write_transaction:
+                        new_media = IGTV(**media_kwargs).save()
+                        user.igtv_posts.connect(new_media, {'on_timestamp': taken_at})
+                else:
+                    with db.write_transaction:
+                        new_media = Video(**media_kwargs).save()
+                        user.video_posts.connect(new_media, {'on_timestamp': taken_at})
+            else:
+                self.log.warning(f"Unhandled media type: {node['__typename']}")
+                continue
 
+            # Extract and save hashtags
+            hashtags = self.scraper.extract_tags(node).get('tags')
             if hashtags:
                 for hashtag in hashtags:
-                    with db.read_transaction:
+                    with db.transaction:
                         tag_object = Hashtag.nodes.first_or_none(name=hashtag)
-                    if not tag_object:
-                        with db.write_transaction:
+                        if not tag_object:
                             tag_object = Hashtag(name=hashtag).save()
-                    with db.write_transaction:
                         new_media.hashtags.connect(tag_object)
 
-        if returns:
+        if returns is True:
             return user
+
+    def _deep_scrape(self, username):
+        with db.read_transaction:
+            user = User.match_username(username)
+            graphvideos = user.video_posts.filter(url__isnull=True)
+        for post in graphvideos:
+            node = self.scraper._get_media_details(shortcode=post.shortcode)
+            post.url = node['video_url']
+            post.view_count = node['video_view_count']
+            post.has_ranked_comments = node['has_ranked_comments']
+            post.is_ad = node['is_ad']
+            with db.write_transaction:
+                post.save()
+            get_user_tags(node, post)
+            get_top_comments(node, post)
+
+        def new_user(user_node):
+            user = User(
+                user_id=user_node['id'],
+                is_verified=user_node['is_verified'],
+                username=user_node['username'],
+                full_name=user_node.get('full_name')
+            ).save()
+            new_pp = ProfilePicture(
+                profile_pic_url=user_node['profile_pic_url']
+            ).save()
+            user.profile_pic.connect(new_pp)
+            return user
+
+        def get_user_tags(node, post):
+            tagged_users = node['edge_media_to_tagged_user']['edges']
+            if tagged_users:
+                for tagged_user in tagged_users:
+                    node = tagged_user['node']
+                    with db.transaction:
+                        user_tagged = User.match_username(node['user']['username'])
+                        if not user_tagged:
+                            user_tagged = new_user(node['user'])
+                        post.tagged_users.connect(user_tagged, {'x': node['x'], 'y': node['y']})
+
+        def get_top_comments(node, post):
+            edges = node['edge_media_to_parent_comment']['edges']
+            edges.extend(node.get('edge_media_preview_comment', []))
+            for edge in edges:
+                node = edge['node']
+                with db.read_transaction:
+                    comment = Comment.nodes.first_or_none(comment_id=node['id'])
+                if not comment:
+                    created_at = datetime.datetime.fromtimestamp(node['created_at'])
+                    with db.transaction:
+                        new_comment = Comment(
+                            comment_id=node['id'], text=node['text'],
+                            edge_liked_by_count=node['edge_liked_by']['count'],
+                            edge_threaded_comments_count=node['edge_threaded_comments']['count']
+                        ).save()
+                        comment_owner = User.match_username(node['owner']['username'])
+                        if not comment_owner:
+                            comment_owner = new_user(node['owner'])
+                        new_comment.owner.connect(comment_owner, {'created_at': created_at})
+                        post.comments.connect(new_comment)
+
+
 
     def _get_followers(self, username):
         """
@@ -233,7 +304,6 @@ class AuthScraperBot():
                 user = self._scrape_user(username, returns="user_id")
                 user_id = user.user_id
 
-        self.log.info("Getting followers")
         self._api_busy = True
         followers = []
         next_max_id = True
@@ -316,33 +386,35 @@ class AuthScraperBot():
 
     @threaded
     def _add_following(self, of_user, following):
-        local = threading.local()
+        #local = threading.local()
         for user in following:
             with db.read_transaction:
-                local.found = User.match_username(user['username']) or Business.match_username(user['username'])
-            if not local.found:
+                found = User.match_username(user['username']) or Business.match_username(user['username'])
+            if not found:
                 with db.write_transaction:
-                    local.new_user = User(
+                    new_user = User(
                         user_id=user['pk'], is_private=user['is_private'],
                         full_name=user['full_name'], username=user['username'],
-                        is_verified=user['is_verified']
+                        is_verified=user['is_verified'],
+                        has_anonymous_profile_pic=user['has_anonymous_profile_picture']
                     ).save()
                 if user['has_anonymous_profile_picture'] is False:
                     with db.write_transaction:
-                        local.new_profile_pic = ProfilePicture(
+                        new_profile_pic = ProfilePicture(
                             profile_pic_url=user['profile_pic_url']
                         ).save()
-                        local.new_user.profile_pic.connect(local.new_profile_pic)
+                        new_user.profile_pic.connect(new_profile_pic)
                 with db.write_transaction:
-                    local.new_user.followers.connect(of_user)
-                local.data = {
+                    new_user.followers.connect(of_user)
+                data = {
                     'scrape_type': 'basic',
-                    'username': local.new_user.username
+                    'username': new_user.username
                 }
-                self.r.rpush('queue:scrape', json.dumps(local.data))
+                self.r.rpush('queue:scrape', json.dumps(data))
             else:
                 with db.write_transaction:
-                    local.found.followers.connect(of_user)
+                    found.followers.connect(of_user)
+
 
     @threaded
     def __process_queue(self):
@@ -351,15 +423,18 @@ class AuthScraperBot():
             if self._api_busy is True:
                 time.sleep(1)
                 continue
+
             packed = self.r.blpop(['queue:scrape'], 30)
             if not packed: continue
             data = json.loads(packed[1])
+
             if data['scrape_type'] == 'following':
                 try:
                     self._get_following(data['username'])
                 except Exception as e:
                     self.log.exception(e)
                     self.r.rpush('queue:scrape', json.dumps(data))
+
             elif data['scrape_type'] == 'followers':
                 try:
                     self._get_followers(data['username'])
@@ -369,7 +444,9 @@ class AuthScraperBot():
 
             elif data['scrape_type'] in ['basic', 'deep']:
                 try:
-                    self._scrape_user(data['username'], mode=data['scrape_type'])
+                    self._scrape_user(data['username'])
+                    if data['scrape_type'] == 'deep':
+                        self._deep_scrape(data['username'])
                 except Exception as e:
                     self.log.exception(e)
                     self.r.rpush('queue:scrape', json.dumps(data))
