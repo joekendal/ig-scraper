@@ -1,5 +1,6 @@
 from neomodel import (StructuredNode, StructuredRel, DateTimeProperty,
-                      RelationshipFrom, IntegerProperty, StringProperty, One)
+                      RelationshipFrom, IntegerProperty, StringProperty, One,
+                      RelationshipTo)
 
 
 class CommentRel(StructuredRel):

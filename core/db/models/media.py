@@ -1,6 +1,6 @@
 from neomodel import (StructuredNode, IntegerProperty, StringProperty,
                       RelationshipFrom, DateTimeProperty, BooleanProperty,
-                      JSONProperty, ArrayProperty, StructuredRel, RelationshipTo,
+                      ArrayProperty, StructuredRel, RelationshipTo,
                       FloatProperty)
 
 class PostRel(StructuredRel):
@@ -9,6 +9,9 @@ class PostRel(StructuredRel):
 class TaggedUserRel(StructuredRel):
     x = FloatProperty()
     y = FloatProperty()
+
+class SidecarRel(StructuredRel):
+    index = IntegerProperty()
 
 
 class Media(StructuredNode):
@@ -19,7 +22,7 @@ class Media(StructuredNode):
     display_url = StringProperty()
     shortcode = StringProperty()
 
-    location = JSONProperty()
+    location = RelationshipFrom('.locations.Location', 'TAGGED_LOCATION')
     accessibility_caption = StringProperty()
 
     height = IntegerProperty()
@@ -35,6 +38,12 @@ class Media(StructuredNode):
 
     has_ranked_comments = BooleanProperty()
     is_ad = BooleanProperty()
+    caption_is_edited = BooleanProperty()
+
+    owner = RelationshipFrom('.users.User', "POSTED", model=PostRel)
+    sponsors = RelationshipTo('.users.User', "SPONSORED_BY")
+
+    last_scraped_top_comments = DateTimeProperty()
 
 
 class Picture(Media):
@@ -49,11 +58,13 @@ class ProfilePicture(StructuredNode):
 
 class Sidecar(Media):
     __typename = "GraphSidecar" # Carousel/Album
-    urls = ArrayProperty()
+    children = RelationshipTo("Media", "HAS", model=SidecarRel)
+    children_count = IntegerProperty(default=0)
 
 
 class Video(Media):
     __typename = "GraphVideo"
+    product_type = "feed"
     url = StringProperty()
     duration = FloatProperty()
     view_count = IntegerProperty()

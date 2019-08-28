@@ -2,6 +2,7 @@ import threading, logging, time, sys, os, json, datetime, atexit, logging, reque
 import redis
 
 from neomodel import db
+from neomodel.contrib.spatial_properties import NeomodelPoint
 
 from core import colours
 from core.bots import threaded
@@ -10,7 +11,7 @@ from core.api.InstagramScraper import InstagramScraper
 from core.api.AWS import EC2Proxy
 
 from core.db.models import (User, Business, ProfilePicture, Picture, Sidecar,
-                            Video, IGTV, Hashtag, Comment)
+                            Video, IGTV, Hashtag, Comment, Location)
 
 
 class AuthScraperBot():
@@ -123,7 +124,7 @@ class AuthScraperBot():
                     user = User(**user_kwargs).save()
         else:
             if user.last_scraped_timestamp:
-                difference = datetime.utcnow() - user.last_scraped_timestamp
+                difference = datetime.datetime.now(datetime.timezone.utc) - user.last_scraped_timestamp
                 if difference.days < 7:
                     self.log.warning(f"User {username} already scraped in last 7 days... Skipping")
                     return
@@ -174,6 +175,8 @@ class AuthScraperBot():
             else:
                 caption = None
 
+            taken_at = datetime.datetime.fromtimestamp(node['taken_at_timestamp'])
+
             media_kwargs = {
                 'media_id': node['id'],
                 'caption': caption,
@@ -182,11 +185,10 @@ class AuthScraperBot():
                 'comments_disabled': node['comments_disabled'],
                 'display_url': node['display_url'],
                 'edge_liked_by_count': node['edge_liked_by']['count'],
-                'location': node['location'],
-                'accessibility_caption': node['accessibility_caption'],
-                'taken_at': datetime.datetime.fromtimestamp(node['taken_at_timestamp']),
-                'height': node['height'],
-                'width': node['width']
+                'accessibility_caption': node.get('accessibility_caption'),
+                'taken_at': taken_at,
+                'height': node['dimensions']['height'],
+                'width': node['dimensions']['width']
             }
             if node['__typename'] == 'GraphImage':
                 with db.write_transaction:
@@ -222,24 +224,79 @@ class AuthScraperBot():
                             tag_object = Hashtag(name=hashtag).save()
                         new_media.hashtags.connect(tag_object)
 
+            # Tag location
+            if node['location']:
+                location = Location.nodes.first_or_none(location_id=node['location']['id'])
+                if not location:
+                    with db.write_transaction:
+                        location = Location(
+                            location_id=node['location']['id'],
+                            has_public_page=node['location']['has_public_page'],
+                            name=node['location']['name'],
+                            slug=node['location']['slug'],
+                        ).save()
+                    # Scrape location
+                    data = {
+                        'scrape_type': 'location',
+                        'location_id': node['location']['id']
+                    }
+                    self.r.rpush('queue:scrape', json.dumps(data))
+                with db.write_transaction:
+                    location.medias.connect(new_media)
+
+
         if returns is True:
             return user
 
-    def _deep_scrape(self, username):
+    def __scrape_location(self, location_id):
+        self.log.info('Scraping Geolocation...')
+        url = "https://www.instagram.com/explore/locations/{0}/?__a=1".format(location_id)
+        resp = self.scraper.get_json(url)
+        if resp is None: raise
+        location_info = json.loads(resp)['graphql']['location']
+        kwargs = {
+            'location_id': location_info['id'],
+            'name': location_info['name'],
+            'has_public_page': location_info['has_public_page'],
+            'latitude': location_info['lat'],
+            'longitude': location_info['lng'],
+            'geospatial': NeomodelPoint((location_info['lng'], location_info['lat']), crs='wgs-84'),
+            'slug': location_info['slug'],
+            'blurb': location_info['blurb'],
+            'website': location_info['website'],
+            'phone': location_info['phone'],
+            'primary_alias_on_fb': location_info['primary_alias_on_fb'],
+            'address_json': json.loads(location_info['address_json'])
+        }
         with db.read_transaction:
-            user = User.match_username(username)
-            graphvideos = user.video_posts.filter(url__isnull=True)
-        for post in graphvideos:
-            node = self.scraper._get_media_details(shortcode=post.shortcode)
-            post.url = node['video_url']
-            post.view_count = node['video_view_count']
-            post.has_ranked_comments = node['has_ranked_comments']
-            post.is_ad = node['is_ad']
+            db_location = Location.nodes.first_or_none(location_id=location_id)
+        if not db_location:
             with db.write_transaction:
-                post.save()
-            get_user_tags(node, post)
-            get_top_comments(node, post)
+                db_location = Location(**kwargs).save()
+        else:
+            db_location.latitude = kwargs['latitude']
+            db_location.longitude = kwargs['longitude']
+            db_location.geospatial = kwargs['geospatial']
+            db_location.blurb = kwargs['blurb']
+            db_location.website = kwargs['website']
+            db_location.phone = kwargs['phone']
+            db_location.primary_alias_on_fb = kwargs['primary_alias_on_fb']
+            db_location.address_json = kwargs['address_json']
+            with db.write_transaction:
+                db_location.save()
 
+        if location_info['profile_pic_url']:
+            with db.read_transaction:
+                profile_pic_found = db_location.profile_pic.search(profile_pic_url=location_info['profile_pic_url'])
+            if not profile_pic_found:
+                with db.write_transaction:
+                    profile_picture = ProfilePicture(
+                        profile_pic_url = location_info['profile_pic_url'],
+                    ).save()
+                    db_location.profile_pic.connect(profile_picture)
+
+
+    def _deep_scrape(self, username):
         def new_user(user_node):
             user = User(
                 user_id=user_node['id'],
@@ -266,7 +323,7 @@ class AuthScraperBot():
 
         def get_top_comments(node, post):
             edges = node['edge_media_to_parent_comment']['edges']
-            edges.extend(node.get('edge_media_preview_comment', []))
+            # edges.extend(node['edge_media_preview_comment'].get('edges', []))
             for edge in edges:
                 node = edge['node']
                 with db.read_transaction:
@@ -284,7 +341,100 @@ class AuthScraperBot():
                             comment_owner = new_user(node['owner'])
                         new_comment.owner.connect(comment_owner, {'created_at': created_at})
                         post.comments.connect(new_comment)
+            post.last_scraped_top_comments = datetime.datetime.now(datetime.timezone.utc)
+            with db.write_transaction:
+                post.save()
 
+        def get_sponsors(node, post):
+            # Add Sponsor(s) if exists
+            if node['edge_media_to_sponsor_user']['edges']:
+                for edge in node['edge_media_to_sponsor_user']['edges']:
+                    node = edge['node']
+                    with db.transaction:
+                        sponsor = User.match_username(node['sponsor']['username'])
+                        if not sponsor:
+                            sponsor = User(
+                                user_id=node['sponsor']['id'],
+                                username=node['sponsor']['username']
+                            ).save()
+                        post.sponsors.connect(sponsor)
+
+
+        self.log.info('Deep scraping...')
+        with db.read_transaction:
+            user = User.match_username(username)
+            graphvideos = user.video_posts.filter(url__isnull=True).all()
+            graphvideos += user.igtv_posts.filter(url__isnull=True).all()
+            carousels = user.carousel_posts.filter(children_count__lte=0).all()
+            pictures = user.picture_posts.filter(last_scraped_top_comments__isnull=True).all()
+
+        for post in graphvideos:
+            node = self.scraper._get_media_details(shortcode=post.shortcode)
+            post.url = node['video_url']
+            post.view_count = node['video_view_count']
+            post.has_ranked_comments = node['has_ranked_comments']
+            post.is_ad = node['is_ad']
+            post.caption_is_edited = node['caption_is_edited']
+            if post.product_type == 'igtv':
+                post.title = node['title']
+            with db.write_transaction:
+                post.save()
+
+            get_user_tags(node, post)
+            get_top_comments(node, post)
+            get_sponsors(node, post)
+
+        for post in carousels:
+            node = self.scraper._get_media_details(shortcode=post.shortcode)
+            post.has_ranked_comments = node['has_ranked_comments']
+            post.caption_is_edited = node['caption_is_edited']
+            post.is_ad = node['is_ad']
+            post.children_count = len(node['edge_sidecar_to_children']['edges'])
+            with db.write_transaction:
+                post.save()
+            get_user_tags(node, post)
+            get_top_comments(node, post)
+            get_sponsors(node, post)
+
+            for index, child in enumerate(node['edge_sidecar_to_children']['edges']):
+                node = child['node']
+                if node['__typename'] == 'GraphImage':
+                    with db.read_transaction:
+                        graphimage = Picture.nodes.first_or_none(shortcode=node['shortcode'])
+                    if not graphimage:
+                        with db.write_transaction:
+                            graphimage = Picture(media_id=node['id'],shortcode=node['shortcode'],
+                                height=node['dimensions']['height'],width=node['dimensions']['width'],
+                                display_url=node['display_url'],accessibility_caption=node['accessibility_caption']
+                            ).save()
+                        get_user_tags(node, graphimage)
+                    with db.write_transaction:
+                        post.children.connect(graphimage, {'index': index})
+                elif node['__typename'] == 'GraphVideo':
+                    with db.read_transaction:
+                        graphvideo = Video.nodes.first_or_none(shortcode=node['shortcode'])
+                    if not graphvideo:
+                        with db.write_transaction:
+                            graphvideo = Video(media_id=node['id'],shortcode=node['shortcode'],
+                                width=node['dimensions']['width'],height=node['dimensions']['height'],
+                                url=node['video_url'],view_count=node['video_view_count']
+                            ).save()
+                        get_user_tags(node, graphvideo)
+                    with db.write_transaction:
+                        post.children.connect(graphvideo, {'index': index})
+
+        for post in pictures:
+            node = self.scraper._get_media_details(shortcode=post.shortcode)
+            get_user_tags(node, post)
+            get_top_comments(node, post)
+            get_sponsors(node, post)
+
+        #self.__get_stories(user)
+
+    def __get_stories(self, user):
+        self.log.info('Fetching stories...')
+        stories = self.scraper.fetch_stories(user_id=user.user_id)
+        print(stories)
 
 
     def _get_followers(self, username):
@@ -433,7 +583,7 @@ class AuthScraperBot():
                     self._get_following(data['username'])
                 except Exception as e:
                     self.log.exception(e)
-                    self.r.rpush('queue:scrape', json.dumps(data))
+                    #self.r.rpush('queue:scrape', json.dumps(data))
 
             elif data['scrape_type'] == 'followers':
                 try:
@@ -449,7 +599,15 @@ class AuthScraperBot():
                         self._deep_scrape(data['username'])
                 except Exception as e:
                     self.log.exception(e)
-                    self.r.rpush('queue:scrape', json.dumps(data))
+                    #self.r.rpush('queue:scrape', json.dumps(data))
+
+            elif data['scrape_type'] == 'location':
+                try:
+                    self.__scrape_location(data['location_id'])
+                except Exception as e:
+                    self.log.exception(e)
+                    #self.r.rpush('queue:scrape', json.dumps(data))
+
 
     def terminate(self):
         self.quit = True

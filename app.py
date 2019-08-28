@@ -9,8 +9,10 @@ logger = logging.getLogger(__name__)
 
 logger.info("\n\n/-------------------- STARTING --------------------/")
 start_time = datetime.datetime.now()
-print(start_time)
+#print(start_time)
 bots = []
+r = redis.Redis(db=0)
+
 with open('.credentials.json') as creds:
     credentials = json.load(creds)
 
@@ -23,12 +25,21 @@ for index, credential in enumerate(credentials):
     ))
 
 def add_followers(username):
-    r = redis.Redis(db=0)
+
     data = {
         'scrape_type': 'followers',
         'username': username
     }
     r.lpush('queue:scrape', json.dumps(data))
 
+def scrape_user(username):
+    data = {
+        'scrape_type': 'deep',
+        'username': username
+    }
+    r.lpush('queue:scrape', json.dumps(data))
+
+
 
 #add_followers('fannyamandanilsson')
+scrape_user('kimkardashian')
