@@ -42,4 +42,13 @@ def scrape_user(username):
 
 
 #add_followers('fannyamandanilsson')
-scrape_user('kimkardashian')
+#scrape_user('kimkardashian')
+
+def get_comments(shortcode, end_cursor=''):
+    comments = list(bots[0].scraper.query_comments_gen(shortcode, end_cursor))
+    #print(comments)
+    print(len(comments))
+
+
+#get_comments('B1xBhpGphHm')
+bots[0]._deep_scrape('fannyamandanilsson')

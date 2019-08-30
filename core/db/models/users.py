@@ -37,7 +37,6 @@ class User(StructuredNode):
     picture_posts = RelationshipTo('.media.Picture', "POSTED", model=PostRel)
     carousel_posts = RelationshipTo('.media.Sidecar', "POSTED", model=PostRel)
     video_posts = RelationshipTo('.media.Video', "POSTED", model=PostRel)
-    igtv_posts = RelationshipTo('.media.IGTV', "POSTED", model=PostRel)
 
     tagged_in = RelationshipFrom('.media.Media', "TAGGED_USER", model=TaggedUserRel)
     comments = RelationshipTo('.interactions.Comment', "COMMENTED", model=CommentRel)
@@ -45,8 +44,6 @@ class User(StructuredNode):
     @staticmethod
     def match_username(username):
         return User.nodes.first_or_none(username=username)
-
-
 
 
 class Business(User):

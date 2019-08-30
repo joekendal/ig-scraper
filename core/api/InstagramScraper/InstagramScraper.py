@@ -28,8 +28,12 @@ import threading
 import concurrent.futures
 import requests
 import tqdm
+import itertools
 
 from .constants import *
+
+# from neomodel import db
+# from core.db.models import Media
 
 
 
@@ -396,20 +400,28 @@ class InstagramScraper(object):
                 return followings, end_cursor
         return None, None
 
-    def query_comments_gen(self, shortcode, end_cursor=''):
+    def query_comments_gen(self, shortcode, end_cursor='', max_number=None):
         """Generator for comments."""
         comments, end_cursor = self.__query_comments(shortcode, end_cursor)
 
         if comments:
             try:
-                while True:
-                    for item in comments:
-                        yield item
-
-                    if end_cursor:
-                        comments, end_cursor = self.__query_comments(shortcode, end_cursor)
-                    else:
-                        return
+                if max_number:
+                    for x in itertools.islice(itertools.count(), 0, max_number, 50):
+                        for item in comments:
+                            yield item
+                        if not end_cursor:
+                            return
+                        if max_number-x > 50:
+                            comments, end_cursor = self.__query_comments(shortcode, end_cursor)
+                else:
+                    while True:
+                        for item in comments:
+                            yield item
+                        if end_cursor:
+                            comments, end_cursor = self.__query_comments(shortcode, end_cursor)
+                        else:
+                            return
             except ValueError:
                 self.logger.exception('Failed to query comments for shortcode ' + shortcode)
 
@@ -845,24 +857,24 @@ class InstagramScraper(object):
 
         return []
 
-    def query_media_gen(self, user, end_cursor=''):
+    def query_media_gen(self, user, end_cursor='', max_number=100):
         """Generator for media."""
-        media, end_cursor = self.__query_media(user['id'], end_cursor)
-
-        if media:
-            try:
-                while True:
+        media, end_cursor = self.__query_media(user.user_id, end_cursor)
+        try:
+            if media:
+                for x in itertools.islice(itertools.count(), 0, max_number, 50):
                     for item in media:
                         if not self.is_new_media(item):
                             return
                         yield item
-
-                    if end_cursor:
-                        media, end_cursor = self.__query_media(user['id'], end_cursor)
-                    else:
+                    if not end_cursor:
                         return
-            except ValueError:
-                self.logger.exception('Failed to query media for user ' + user['username'])
+                    if max_number-x > 0:
+                        media, end_cursor = self.__query_media(user.user_id, end_cursor)
+
+        except ValueError:
+            self.logger.exception('Failed to query media for user ' + user.username)
+
 
     def __query_media(self, id, end_cursor=''):
         params = QUERY_MEDIA_VARS.format(id, end_cursor)
@@ -1108,6 +1120,11 @@ class InstagramScraper(object):
 
         current_timestamp = self.__get_timestamp(item)
         return current_timestamp > 0 and current_timestamp > self.last_scraped_filemtime
+        # with db.read_transaction:
+        #     found = Media.nodes.first_or_none(media_id=item['id'])
+        # if not found:
+        #     return True
+        # return False
 
     @staticmethod
     def __get_timestamp(item):

@@ -3,15 +3,15 @@ import redis
 
 from neomodel import db
 from neomodel.contrib.spatial_properties import NeomodelPoint
+from tqdm import tqdm
 
 from core import colours
 from core.bots import threaded
 from core.api.InstagramAPI import InstagramAPI
 from core.api.InstagramScraper import InstagramScraper
 from core.api.AWS import EC2Proxy
-
 from core.db.models import (User, Business, ProfilePicture, Picture, Sidecar,
-                            Video, IGTV, Hashtag, Comment, Location)
+                            Video, Hashtag, Comment, Location, Media)
 
 
 class AuthScraperBot():
@@ -45,7 +45,6 @@ class AuthScraperBot():
     def start(self):
         self.__authenticate()
         self.__process_queue()
-
 
     def __rotate_ec2(self):
         self.log.warning("Changing IP address")
@@ -155,94 +154,29 @@ class AuthScraperBot():
                 user.profile_pic.connect(profile_picture)
 
         # Add graph media if not exists
-        for item in user_info['edge_owner_to_timeline_media']['edges']:
-            node = item['node']
-            with db.read_transaction:
-                if node['__typename'] == 'GraphImage':
-                    found = Picture.nodes.first_or_none(media_id=node['id'])
-                elif node['__typename'] == 'GraphVideo':
-                    if node.get('product_type', '') == 'igtv':
-                        found = IGTV.nodes.first_or_none(media_id=node['id'])
-                    else:
-                        found = Video.nodes.first_or_none(media_id=node['id'])
-                elif node['__typename'] == 'GraphSidecar':
-                    found = Sidecar.nodes.first_or_none(media_id=node['id'])
-
-            if found: break
-
-            if node['edge_media_to_caption']['edges']:
-                caption = node['edge_media_to_caption']['edges'][0]['node']['text']
-            else:
-                caption = None
-
-            taken_at = datetime.datetime.fromtimestamp(node['taken_at_timestamp'])
-
-            media_kwargs = {
-                'media_id': node['id'],
-                'caption': caption,
-                'shortcode': node['shortcode'],
-                'edge_comments_count': node['edge_media_to_comment'].get('count'),
-                'comments_disabled': node['comments_disabled'],
-                'display_url': node['display_url'],
-                'edge_liked_by_count': node['edge_liked_by']['count'],
-                'accessibility_caption': node.get('accessibility_caption'),
-                'taken_at': taken_at,
-                'height': node['dimensions']['height'],
-                'width': node['dimensions']['width']
-            }
-            if node['__typename'] == 'GraphImage':
-                with db.write_transaction:
-                    new_media = Picture(**media_kwargs).save()
-                    user.picture_posts.connect(new_media, {'on_timestamp': taken_at})
-            elif node['__typename'] == 'GraphSidecar':
-                with db.write_transaction:
-                    new_media = Sidecar(**media_kwargs).save()
-                    user.carousel_posts.connect(new_media, {'on_timestamp': taken_at})
-            elif node['__typename'] == 'GraphVideo':
-                media_kwargs['view_count'] = node['video_view_count']
-                if node.get('product_type', '') == 'igtv':
-                    media_kwargs['title'] = node['title']
-                    media_kwargs['duration'] = node['video_duration']
-                    with db.write_transaction:
-                        new_media = IGTV(**media_kwargs).save()
-                        user.igtv_posts.connect(new_media, {'on_timestamp': taken_at})
-                else:
-                    with db.write_transaction:
-                        new_media = Video(**media_kwargs).save()
-                        user.video_posts.connect(new_media, {'on_timestamp': taken_at})
-            else:
-                self.log.warning(f"Unhandled media type: {node['__typename']}")
-                continue
-
-            # Extract and save hashtags
-            hashtags = self.scraper.extract_tags(node).get('tags')
-            if hashtags:
-                for hashtag in hashtags:
-                    with db.transaction:
-                        tag_object = Hashtag.nodes.first_or_none(name=hashtag)
-                        if not tag_object:
-                            tag_object = Hashtag(name=hashtag).save()
-                        new_media.hashtags.connect(tag_object)
-
-            # Tag location
-            if node['location']:
-                location = Location.nodes.first_or_none(location_id=node['location']['id'])
-                if not location:
-                    with db.write_transaction:
-                        location = Location(
-                            location_id=node['location']['id'],
-                            has_public_page=node['location']['has_public_page'],
-                            name=node['location']['name'],
-                            slug=node['location']['slug'],
-                        ).save()
-                    # Scrape location
-                    data = {
-                        'scrape_type': 'location',
-                        'location_id': node['location']['id']
-                    }
-                    self.r.rpush('queue:scrape', json.dumps(data))
-                with db.write_transaction:
-                    location.medias.connect(new_media)
+        # for item in user_info['edge_owner_to_timeline_media']['edges']:
+        #     node = item['node']
+        #     self.__save_media(node, user)
+        #
+        #     # Tag location
+        #     if node['location']:
+        #         location = Location.nodes.first_or_none(location_id=node['location']['id'])
+        #         if not location:
+        #             with db.write_transaction:
+        #                 location = Location(
+        #                     location_id=node['location']['id'],
+        #                     has_public_page=node['location']['has_public_page'],
+        #                     name=node['location']['name'],
+        #                     slug=node['location']['slug'],
+        #                 ).save()
+        #             # Scrape location
+        #             data = {
+        #                 'scrape_type': 'location',
+        #                 'location_id': node['location']['id']
+        #             }
+        #             self.r.rpush('queue:scrape', json.dumps(data))
+        #         with db.write_transaction:
+        #             location.medias.connect(new_media)
 
 
         if returns is True:
@@ -295,8 +229,105 @@ class AuthScraperBot():
                     ).save()
                     db_location.profile_pic.connect(profile_picture)
 
+    def _deep_scrape(self, username, post_depth=150, comment_depth=None):
+        # Get user if exists
+        user = User.match_username(username)
+        if not user:
+            user = self._scrape_user(username, returns=True)
+        new_media = list(self.scraper.query_media_gen(user, max_number=post_depth))
+        m_desc = f"Saving {user.username}'s {max_number} most recent posts"
+        for media in tqdm(reversed(new_media), desc=m_desc, ascii=False, total=len(new_media)):
+            if self.__save_media(media, user) is False: continue
+            if media['comments_disabled']: continue
+            num_comments = media['edge_media_to_comment']['count']
+            c_desc = f"Saving comments for post https://instagram.com/p/{media['shortcode']}/"
+            for comment in tqdm(self.scraper.query_comments_gen(media['shortcode'], max_number=comment_depth),
+                                total=num_comments, desc=c_desc, ascii=False):
+                self.__save_comment(comment, media['id'])
 
-    def _deep_scrape(self, username):
+
+    def __save_media(self, media, user):
+        # Check exists
+        with db.read_transaction:
+            if Media.nodes.first_or_none(shortcode=media['shortcode']): return False
+
+        # Create new
+        if media['edge_media_to_caption']['edges']:
+            caption = media['edge_media_to_caption']['edges'][0]['node']['text']
+        else:
+            caption = None
+        taken_at = datetime.datetime.fromtimestamp(media['taken_at_timestamp'])
+        media_kwargs = {
+            'media_id': media['id'],'caption': caption,
+            'shortcode': media['shortcode'], 'comments_disabled': media['comments_disabled'],
+            'edge_comments_count': media['edge_media_to_comment'].get('count'),
+            'display_url': media['display_url'], 'taken_at': taken_at,
+            'edge_liked_by_count': media['edge_media_preview_like']['count'],
+            'height': media['dimensions']['height'],
+            'width': media['dimensions']['width'],
+        }
+        if media['__typename'] == 'GraphImage':
+            with db.write_transaction:
+                new_media = Picture(**media_kwargs).save()
+        elif media['__typename'] == 'GraphSidecar':
+            media_kwargs['urls'] = media['urls']
+            with db.write_transaction:
+                new_media = Sidecar(**media_kwargs).save()
+        elif media['__typename'] == 'GraphVideo':
+            media_kwargs['view_count'] = media['video_view_count']
+            if media.get('product_type', '') == 'igtv':
+                media_kwargs['title'] = media['title']
+                media_kwargs['duration'] = media['video_duration']
+                media_kwargs['product_type'] = 'igtv'
+            else:
+                media_kwargs['urls'] = media['urls']
+            with db.write_transaction:
+                new_media = Video(**media_kwargs).save()
+        else:
+            return False
+        with db.write_transaction:
+            user.all_posts.connect(new_media, {'on_timestamp': taken_at})
+
+        self.__save_hashtags(media, new_media)
+
+        return True
+
+    def __save_hashtags(self, node, media):
+        hashtags = self.scraper.extract_tags(node).get('tags')
+        if hashtags:
+            for hashtag in hashtags:
+                with db.transaction:
+                    tag_object = Hashtag.nodes.first_or_none(name=hashtag)
+                    if not tag_object:
+                        tag_object = Hashtag(name=hashtag).save()
+                    media.hashtags.connect(tag_object)
+
+    def __save_comment(self, comment, media_id):
+        with db.read_transaction:
+            if Comment.nodes.first_or_none(comment_id=comment['id']): return
+            media = Media.nodes.get(media_id=media_id)
+        created_at = datetime.datetime.fromtimestamp(comment['created_at'])
+        with db.transaction:
+            new_comment = Comment(
+                comment_id=comment['id'],
+                created_at=created_at,
+                text=comment['text']
+            ).save()
+            comment_owner = User.match_username(comment['owner']['username'])
+            if not comment_owner:
+                comment_owner = User(
+                    user_id=comment['owner']['id'],
+                    username=comment['owner']['username']
+                ).save()
+                pp = ProfilePicture(
+                    profile_pic_url=comment['owner']['profile_pic_url']
+                ).save()
+                comment_owner.profile_pic.connect(pp)
+            new_comment.owner.connect(comment_owner, {'created_at': created_at})
+            media.comments.connect(new_comment)
+
+
+    def _surface_scrape(self, username):
         def new_user(user_node):
             user = User(
                 user_id=user_node['id'],
@@ -359,42 +390,13 @@ class AuthScraperBot():
                             ).save()
                         post.sponsors.connect(sponsor)
 
-
         self.log.info('Deep scraping...')
         with db.read_transaction:
             user = User.match_username(username)
             graphvideos = user.video_posts.filter(url__isnull=True).all()
-            graphvideos += user.igtv_posts.filter(url__isnull=True).all()
             carousels = user.carousel_posts.filter(children_count__lte=0).all()
             pictures = user.picture_posts.filter(last_scraped_top_comments__isnull=True).all()
-
-        for post in graphvideos:
-            node = self.scraper._get_media_details(shortcode=post.shortcode)
-            post.url = node['video_url']
-            post.view_count = node['video_view_count']
-            post.has_ranked_comments = node['has_ranked_comments']
-            post.is_ad = node['is_ad']
-            post.caption_is_edited = node['caption_is_edited']
-            if post.product_type == 'igtv':
-                post.title = node['title']
-            with db.write_transaction:
-                post.save()
-
-            get_user_tags(node, post)
-            get_top_comments(node, post)
-            get_sponsors(node, post)
-
         for post in carousels:
-            node = self.scraper._get_media_details(shortcode=post.shortcode)
-            post.has_ranked_comments = node['has_ranked_comments']
-            post.caption_is_edited = node['caption_is_edited']
-            post.is_ad = node['is_ad']
-            post.children_count = len(node['edge_sidecar_to_children']['edges'])
-            with db.write_transaction:
-                post.save()
-            get_user_tags(node, post)
-            get_top_comments(node, post)
-            get_sponsors(node, post)
 
             for index, child in enumerate(node['edge_sidecar_to_children']['edges']):
                 node = child['node']
