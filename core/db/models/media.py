@@ -23,7 +23,7 @@ class Media(StructuredNode):
     shortcode = StringProperty()
 
     location = RelationshipFrom('.locations.Location', 'TAGGED_LOCATION')
-    #accessibility_caption = StringProperty()
+    accessibility_caption = StringProperty()
 
     height = IntegerProperty()
     width = IntegerProperty()
@@ -36,12 +36,12 @@ class Media(StructuredNode):
     edge_liked_by_count = IntegerProperty()
     edge_comments_count = IntegerProperty()
 
-    #has_ranked_comments = BooleanProperty()
-    #is_ad = BooleanProperty()
-    #caption_is_edited = BooleanProperty()
+    has_ranked_comments = BooleanProperty()
+    is_ad = BooleanProperty()
+    caption_is_edited = BooleanProperty()
 
     owner = RelationshipFrom('.users.User', "POSTED", model=PostRel)
-    #sponsors = RelationshipTo('.users.User', "SPONSORED_BY")
+    sponsors = RelationshipTo('.users.User', "SPONSORED_BY")
 
     #last_scraped_top_comments = DateTimeProperty()
 
@@ -58,9 +58,9 @@ class ProfilePicture(StructuredNode):
 
 class Sidecar(Media):
     __typename = "GraphSidecar" # Carousel/Album
-    #children = RelationshipTo("Media", "HAS", model=SidecarRel)
-    #children_count = IntegerProperty(default=0)
-    urls = ArrayProperty()
+    children = RelationshipTo("Media", "HAS", model=SidecarRel)
+    children_count = IntegerProperty(default=0)
+    #urls = ArrayProperty()
 
 
 class Video(Media):

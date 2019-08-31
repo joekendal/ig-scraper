@@ -425,6 +425,21 @@ class InstagramScraper(object):
             except ValueError:
                 self.logger.exception('Failed to query comments for shortcode ' + shortcode)
 
+    def query_likes_gen(self, shortcode, end_cursor=''):
+        """Generator for likes."""
+        likes, end_cursor = self.__query_likes(shortcode, end_cursor)
+        if likes:
+            try:
+                while True:
+                    for item in likes:
+                        yield item
+                    if end_cursor:
+                        likes, end_cursor = self.__query_likes(shortcode, end_cursor)
+                    else:
+                        return
+            except ValueError:
+                self.logger.exception('Failed to query comments for shortcode ' + shortcode)
+
     def __query_comments(self, shortcode, end_cursor=''):
         params = QUERY_COMMENTS_VARS.format(shortcode, end_cursor)
         self.update_ig_gis_header(params)
@@ -439,6 +454,23 @@ class InstagramScraper(object):
                 comments = [node['node'] for node in container['edges']]
                 end_cursor = container['page_info']['end_cursor']
                 return comments, end_cursor
+
+        return None, None
+
+    def __query_likes(self, shortcode, end_cursor=''):
+        params = QUERY_LIKES_VARS.format(shortcode, end_cursor)
+        self.update_ig_gis_header(params)
+
+        resp = self.get_json(QUERY_LIKES.format(params))
+
+        if resp is not None:
+            payload = json.loads(resp)['data']['shortcode_media']
+
+            if payload:
+                container = payload['edge_liked_by']
+                likes = [node['node'] for node in container['edges']]
+                end_cursor = container['page_info']['end_cursor']
+                return likes, end_cursor
 
         return None, None
 

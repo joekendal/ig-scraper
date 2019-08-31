@@ -28,6 +28,9 @@ QUERY_LOCATION_VARS = '{{"id":"{0}","first":50,"after":"{1}"}}'
 QUERY_MEDIA = BASE_URL + 'graphql/query/?query_hash=42323d64886122307be10013ad2dcc44&variables={0}'
 QUERY_MEDIA_VARS = '{{"id":"{0}","first":50,"after":"{1}"}}'
 
+QUERY_LIKES = BASE_URL + "graphql/query/?query_hash=d5d763b1e2acf209d62d22d184488e57&variables={0}"
+QUERY_LIKES_VARS = '{{"shortcode":"{0}","first":50,"after":"{1}"}}'
+
 MAX_CONCURRENT_DOWNLOADS = 5
 CONNECT_TIMEOUT = 90
 MAX_RETRIES = 5
