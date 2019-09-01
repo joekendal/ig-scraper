@@ -51,4 +51,5 @@ def get_comments(shortcode, end_cursor=''):
 
 
 #get_comments('B1xBhpGphHm')
-bots[0]._deep_scrape('fannyamandanilsson')
+# bots[0]._deep_scrape('fannyamandanilsson')
+bots[0]._get_stories('bellahadid')

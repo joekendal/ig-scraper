@@ -234,7 +234,7 @@ class InstagramScraper(object):
 
         self.session.headers.update({'X-CSRFToken': req.cookies['csrftoken']})
 
-        self.session.headers = {'user-agent': CHROME_WIN_UA}
+        self.session.headers.update({'user-agent': CHROME_WIN_UA})
         self.rhx_gis = ""
         self.authenticated = True
 
@@ -254,7 +254,7 @@ class InstagramScraper(object):
         if login_text.get('authenticated') and login.status_code == 200:
             self.authenticated = True
             self.logged_in = True
-            self.session.headers = {'user-agent': CHROME_WIN_UA}
+            self.session.headers.update({'user-agent': CHROME_WIN_UA})
             self.rhx_gis = ""
         else:
             self.logger.error('Login failed for ' + self.login_user)
@@ -655,7 +655,7 @@ class InstagramScraper(object):
 
     def scrape(self, executor=concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DOWNLOADS)):
         """Crawls through and downloads user's media"""
-        self.session.headers = {'user-agent': STORIES_UA}
+        self.session.headers.update({'user-agent': STORIES_UA})
         try:
             for username in self.usernames:
                 self.posts = []
@@ -880,13 +880,16 @@ class InstagramScraper(object):
 
     def fetch_stories(self, user_id):
         """Fetches the user's stories."""
-        resp = self.get_json(STORIES_URL.format(user_id))
+        params = QUERY_STORIES_VARS.format(user_id)
+        self.update_ig_gis_header(params)
+
+        resp = self.get_json(QUERY_STORIES.format(params))
 
         if resp is not None:
             retval = json.loads(resp)
             if retval['data'] and 'reels_media' in retval['data'] and len(retval['data']['reels_media']) > 0 and len(retval['data']['reels_media'][0]['items']) > 0:
-                return [self.set_story_url(item) for item in retval['data']['reels_media'][0]['items']]
-
+                #return [self.set_story_url(item) for item in retval['data']['reels_media'][0]['items']]
+                return retval['data']['reels_media'][0]
         return []
 
     def query_media_gen(self, user, end_cursor='', max_number=100):
@@ -1001,7 +1004,7 @@ class InstagramScraper(object):
         urls = []
         if 'video_resources' in item:
             urls.append(item['video_resources'][-1]['src'])
-        if 'display_resources' in item:
+        elif 'display_resources' in item:
             urls.append(item['display_resources'][-1]['src'])
         item['urls'] = urls
         return item

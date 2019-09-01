@@ -33,13 +33,20 @@ class User(StructuredNode):
     joined_recently = BooleanProperty()
     edge_timeline_media_count = IntegerProperty()
 
-    all_posts = RelationshipTo('.media.Media', "POSTED", model=PostRel)
-    picture_posts = RelationshipTo('.media.Picture', "POSTED", model=PostRel)
-    carousel_posts = RelationshipTo('.media.Sidecar', "POSTED", model=PostRel)
-    video_posts = RelationshipTo('.media.Video', "POSTED", model=PostRel)
+    timeline_posts = RelationshipTo('.media.Media', "POSTED", model=PostRel)
+    # picture_posts = RelationshipTo('.media.Picture', "POSTED", model=PostRel)
+    # carousel_posts = RelationshipTo('.media.Sidecar', "POSTED", model=PostRel)
+    # video_posts = RelationshipTo('.media.Video', "POSTED", model=PostRel)
+
+    stories = RelationshipTo('.media.Story', 'POSTED_STORY', model=PostRel)
 
     tagged_in = RelationshipFrom('.media.Media', "TAGGED_USER", model=TaggedUserRel)
     comments = RelationshipTo('.interactions.Comment', "COMMENTED", model=CommentRel)
+
+    @property
+    def timeline(self):
+        # All timeline posts in order of most recent
+        return self.timeline_posts.order_by('-taken_at')
 
     @staticmethod
     def match_username(username):

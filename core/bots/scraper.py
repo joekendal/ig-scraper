@@ -11,7 +11,8 @@ from core.api.InstagramAPI import InstagramAPI
 from core.api.InstagramScraper import InstagramScraper
 from core.api.AWS import EC2Proxy
 from core.db.models import (User, Business, ProfilePicture, Picture, Sidecar,
-                            Video, Hashtag, Comment, Location, Media)
+                            Video, Hashtag, Comment, Location, Media, Poll,
+                            StoryImage, StoryVideo)
 
 
 class AuthScraperBot():
@@ -163,24 +164,6 @@ class AuthScraperBot():
         if returns is True:
             return user
 
-    def __save_geotag(self, node, media):
-        if not node.get('location'): return
-        location = Location.nodes.first_or_none(location_id=node['location']['id'])
-        if not location:
-            with db.write_transaction:
-                location = Location(
-                    location_id=node['location']['id'],
-                    has_public_page=node['location']['has_public_page'],
-                    name=node['location']['name'],
-                    slug=node['location']['slug']
-                ).save()
-            self.r.rpush('queue:scrape', json.dumps({
-                'scrape_type': 'location',
-                'location_id': node['location']['id']
-            }))
-        with db.write_transaction:
-            location.medias.connect(media)
-
     def __scrape_location(self, location_id):
         self.log.info('Scraping Geolocation...')
         url = "https://www.instagram.com/explore/locations/{0}/?__a=1".format(location_id)
@@ -262,10 +245,17 @@ class AuthScraperBot():
                 self.__save_like(like, post)
 
 
-    def __save_media(self, media, user):
-        # Check exists
+    def __get_or_save_media(self, **kwargs):
+        if not all(k in kwargs for k in ['user', 'shortcode']):
+            return False
         with db.read_transaction:
-            if Media.nodes.first_or_none(shortcode=media['shortcode']): return False
+            media = Media.nodes.first_or_none(shortcode=kwargs['shortcode'])
+        if not media:
+            node = self.scraper._get_media_details(shortcode=kwargs['shortcode'])
+            media = self.__save_media(node, kwargs['user'])
+        return media
+
+    def __save_media(self, media, user):
         # Create new
         caption = None
         if media['edge_media_to_caption']['edges']:
@@ -274,7 +264,7 @@ class AuthScraperBot():
         media_kwargs = {
             'media_id': media['id'],'caption': caption,
             'shortcode': media['shortcode'], 'comments_disabled': media['comments_disabled'],
-            'edge_comments_count': media['edge_media_to_comment'].get('count'),
+            'edge_comments_count': media['edge_media_preview_comment'].get('count'),
             'display_url': media['display_url'], 'taken_at': taken_at,
             'edge_liked_by_count': media['edge_media_preview_like']['count'],
             'height': media['dimensions']['height'],
@@ -333,7 +323,7 @@ class AuthScraperBot():
         else:
             return False
         with db.write_transaction:
-            user.all_posts.connect(new_media, {'on_timestamp': taken_at})
+            user.timeline_posts.connect(new_media, {'on_timestamp': taken_at})
 
         self.__save_hashtags(media, new_media)
         self.__save_top_comments(media, new_media)
@@ -341,15 +331,49 @@ class AuthScraperBot():
 
         return new_media
 
+    def __save_geotag(self, node, media):
+        if not node.get('location'): return
+        location = self.__get_or_save_location(location_id=node['location']['id'])
+        with db.write_transaction:
+            location.medias.connect(media)
+
+    def __get_or_save_location(self, **kwargs):
+        with db.read_transaction:
+            location = Location.nodes.first_or_none(location_id=kwargs.get('location_id'))
+        if not location:
+            location = self.__save_location(**kwargs)
+        return location
+
+    def __save_location(self, **kwargs):
+        with db.write_transaction:
+            location = Location(**kwargs).save()
+        self.r.rpush('queue:scrape', json.dumps({
+            'scrape_type': 'location',
+            'location_id': kwargs['location_id']
+        }))
+        return location
+
+    @staticmethod
+    def __get_or_save_hashtag(**kwargs):
+        with db.read_transaction:
+            if kwargs.get('hashtag_id'):
+                hashtag = Hashtag.nodes.first_or_none(hashtag_id=kwargs['hashtag_id'])
+            elif kwargs.get('name'):
+                hashtag = Hashtag.nodes.first_or_none(name=kwargs['name'])
+            else:
+                return False
+        if not hashtag:
+            with db.write_transaction:
+                hashtag = Hashtag(**kwargs).save()
+        return hashtag
+
     def __save_hashtags(self, node, media):
         hashtags = self.scraper.extract_tags(node).get('tags')
         if not hashtags:
             return
         for hashtag in hashtags:
-            with db.transaction:
-                tag_object = Hashtag.nodes.first_or_none(name=hashtag)
-                if not tag_object:
-                    tag_object = Hashtag(name=hashtag).save()
+            tag_object = self.__get_or_save_hashtag(name=hashtag)
+            with db.write_transaction:
                 media.hashtags.connect(tag_object)
 
     def __save_comment(self, node, media):
@@ -410,6 +434,20 @@ class AuthScraperBot():
                     media.comments.connect(new_comment)
 
     @staticmethod
+    def __get_or_save_user(**kwargs):
+        with db.read_transaction:
+            if kwargs.get('id'):
+                user = User.nodes.first_or_none(user_id=kwargs['id'])
+            elif kwargs.get('username'):
+                user = User.nodes.first_or_none(username=kwargs['username'])
+            else:
+                return False
+        if not user:
+            with db.write_transaction:
+                user = User(**kwargs).save()
+        return user
+
+    @staticmethod
     def __save_user_basic(node):
         existing_user = User.nodes.first_or_none(user_id=node['id'])
         if existing_user: return existing_user
@@ -442,7 +480,7 @@ class AuthScraperBot():
                 })
 
     def __save_sponsors(self, node, media):
-        if not node.get('edge_media_to_sponsor_user', {'edges': None}).get('edges'):
+        if not node.get('edge_media_to_sponsor_user', {'edges': []}).get('edges'):
             return
         for edge in node['edge_media_to_sponsor_user']['edges']:
             with db.read_transaction:
@@ -452,10 +490,102 @@ class AuthScraperBot():
             with db.write_transaction:
                 media.sponsors.connect(sponsor)
 
-    def __get_stories(self, user):
+    def __save_story(self, node, user, **kwargs):
+        story_kwargs = {
+            'story_id': node['id'],
+            'height': node['dimensions']['height'],
+            'width': node['dimensions']['width'],
+            'taken_at_timestamp': datetime.datetime.fromtimestamp(node['taken_at_timestamp']),
+            'expiring_at_timestamp': datetime.datetime.fromtimestamp(node['expiring_at_timestamp']),
+            'story_cta_url': node['story_cta_url'],
+            'story_view_count': node['story_view_count'] or node.get('edge_story_media_viewers', {'count': None}).get('count') or None,
+            'story_app_attribution': node['story_app_attribution'],
+            'can_reshare': kwargs.get('can_reshare'),
+            'can_reply': kwargs.get('can_reply')
+        }
+        # TODO: Download Story to S3 bucket
+        s3_uri = ""
+        # Save story
+        story_kwargs['s3_uri'] = s3_uri
+        with db.write_transaction:
+            if node['__typename'] == 'GraphStoryVideo' or node.get('is_video') is True:
+                story_kwargs['has_audio'] = node.get('has_audio')
+                story_kwargs['video_duration'] = node.get('video_duration')
+                new_story = StoryVideo(**story_kwargs).save()
+            elif node['__typename'] == 'GraphStoryImage' and node.get('is_video', False) is False:
+                new_story = StoryImage(**story_kwargs).save()
+            else:
+                raise # Temp
+            new_story.owner.connect(user, {'on_timestamp': story_kwargs['taken_at_timestamp']})
+        # Save sponsors
+        if node.get('edge_media_to_sponsor_user', {'edges': []}).get('edges'):
+            self.__save_sponsors(node, new_story)
+        # Save tappable objects
+        if not node['tappable_objects']:
+            return
+        try:
+            for item in node['tappable_objects']:
+                defaults = {
+                    'x': item['x'], 'y': item['y'],
+                    'width': item['width'], 'height': item['height'],
+                    'rotation': item['rotation'],
+                    'custom_title': item['custom_title'],
+                    'attribution': item['attribution']
+                }
+                if item['__typename'] == 'GraphTappableLocation':
+                    location = self.__get_or_save_location(location_id=item['id'])
+                    with db.write_transaction:
+                        new_story.tappable_locations.connect(location, defaults)
+                elif item['__typename'] == 'GraphTappableFallback':
+                    if item['tappable_type'] == 'poll':
+                        with db.write_transaction:
+                            new_poll = Poll().save()
+                            new_story.tappable_poll.connect(new_poll, defaults)
+                elif item['__typename'] == 'GraphTappableHashtag':
+                    hashtag = self.__get_or_save_hashtag(hashtag_id=item['id'],
+                                                         name=item['name'])
+                    with db.write_transaction:
+                        new_story.tappable_hashtags.connect(hashtag, defaults)
+                elif item['__typename'] == 'GraphTappableMention':
+                    user = self.__get_or_save_user(username=item['username'],
+                        full_name=item['full_name'], is_private=item['is_private']
+                    )
+                    with db.write_transaction:
+                        new_story.tappable_user.connect(user, defaults)
+                elif item['__typename'] == 'GraphTappableFeedMedia':
+                    media = self.__get_or_save_media(media_id=item['media']['id'],
+                                                     shortcode=item['media']['shortcode'],
+                                                     user=user)
+                    with db.write_transaction:
+                        new_story.tappable_feed.connect(media, defaults)
+        except Exception as e:
+            self.log.exception(e)
+            with db.write_transaction:
+                new_story.delete()
+            raise
+
+
+    def _get_stories(self, username=None, user=None):
+        if not user:
+            if not username:
+                return False
+            with db.read_transaction:
+                user = User.match_username(username)
+            if not user:
+                user = self._scrape_user(username, returns=True)
         self.log.info('Fetching stories...')
-        stories = self.scraper.fetch_stories(user_id=user.user_id)
-        print(stories)
+        data = self.scraper.fetch_stories(user_id=user.user_id)
+        new_stories = []
+        for item in reversed(data['items']):
+            if user.stories.search(
+                taken_at_timestamp=datetime.datetime.fromtimestamp(item['taken_at_timestamp'])
+            ):
+                break
+            new_stories.append(item)
+
+        for story in tqdm(reversed(new_stories), desc='Saving new stories'):
+            self.__save_story(story, user, can_reshare=data.get('can_reshare'),
+                              can_reply=data.get('can_reply'))
 
     def _get_followers(self, username):
         """

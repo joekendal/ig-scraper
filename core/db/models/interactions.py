@@ -18,3 +18,6 @@ class Comment(StructuredNode):
 
 class ThreadedComment(Comment):
     parent_comment = RelationshipFrom("Comment", "REPLY", cardinality=One)
+
+class Poll(StructuredNode):
+    pass

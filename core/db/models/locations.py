@@ -13,8 +13,8 @@ class Location(StructuredNode):
     name = StringProperty()
     has_public_page = BooleanProperty()
 
-    latitude = FloatProperty()
-    longitude = FloatProperty()
+    lat = FloatProperty()
+    lng = FloatProperty()
     geospatial = PointProperty(crs='wgs-84')
 
     slug = StringProperty()
