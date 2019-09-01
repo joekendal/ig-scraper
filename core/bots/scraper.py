@@ -228,7 +228,7 @@ class AuthScraperBot():
                     ).save()
                     db_location.profile_pic.connect(profile_picture)
 
-    def _deep_scrape(self, username, post_depth=150, comment_depth=None,
+    def _deep_scrape(self, username, post_depth=50, comment_depth=None,
                      geolocations=False, tagged_users=False, post_likes=False):
 
         user = User.match_username(username)
@@ -236,7 +236,7 @@ class AuthScraperBot():
             user = self._scrape_user(username, returns=True)
 
         new_media = list(self.scraper.query_media_gen(user, max_number=post_depth))
-        m_desc = f"Saving {user.username}'s {max_number} most recent posts"
+        m_desc = f"Saving {user.username}'s {post_depth} most recent posts"
         for media in tqdm(reversed(new_media), desc=m_desc, ascii=False, total=len(new_media)):
             post = self.__save_media(media, user)
             if post is False: continue
@@ -288,10 +288,13 @@ class AuthScraperBot():
         elif media['__typename'] == 'GraphSidecar':
             if media.get('urls'):
                 media_kwargs['urls'] = media['urls']
+            children = media.get('edge_sidecar_to_children', {'edges': []})['edges']
+            media_kwargs['children_count'] = len(children)
             with db.write_transaction:
                 new_media = Sidecar(**media_kwargs).save()
-            if media.get('edge_sidecar_to_children', {'edges': []})['edges']:
-                for index, child in enumerate(node['edge_sidecar_to_children']['edges']):
+                self.__save_user_tags(media, new_media)
+            if len(children) > 0:
+                for index, child in enumerate(children):
                     node = child['node']
                     child_kwargs = {
                         'media_id': node['id'],
@@ -316,7 +319,10 @@ class AuthScraperBot():
             media_kwargs['has_ranked_comments'] = media.get('has_ranked_comments')
             media_kwargs['is_ad'] = media.get('is_ad')
             media_kwargs['caption_is_edited'] = media.get('caption_is_edited')
-            media_kwargs['urls'] = media['urls'] if media.get('urls') else [media['video_url']]
+            if media.get('urls'):
+                media_kwargs['urls'] = media['urls']
+            elif media.get('video_url'):
+                media_kwargs['urls'] = [media['video_url']]
             if media.get('product_type', '') == 'igtv':
                 media_kwargs['title'] = media['title']
                 media_kwargs['duration'] = media['video_duration']
@@ -350,15 +356,17 @@ class AuthScraperBot():
         with db.read_transaction:
             if Comment.nodes.first_or_none(comment_id=node['id']): return
         created_at = datetime.datetime.fromtimestamp(node['created_at'])
-        with db.transaction:
+        with db.write_transaction:
             new_comment = Comment(
                 comment_id=node['id'],
                 created_at=created_at,
                 text=node['text']
             ).save()
+        with db.read_transaction:
             comment_owner = User.match_username(node['owner']['username'])
-            if not comment_owner:
-                comment_owner = self.__save_user_basic(node['owner'])
+        if not comment_owner:
+            comment_owner = self.__save_user_basic(node['owner'])
+        with db.write_transaction:
             new_comment.owner.connect(comment_owner, {'created_at': created_at})
             media.comments.connect(new_comment)
 
@@ -387,21 +395,23 @@ class AuthScraperBot():
                     comment_exists.save()
             else:
                 created_at = datetime.datetime.fromtimestamp(edge_node['created_at'])
-                with db.transaction:
+                with db.write_transaction:
                     new_comment = Comment(
                         comment_id=edge_node['id'], text=edge_node['text'], created_at=created_at,
                         edge_liked_by_count=edge_node['edge_liked_by']['count'],
                         edge_threaded_comments_count=edge_node['edge_threaded_comments']['count']
                     ).save()
+                with db.read_transaction:
                     comment_owner = User.match_username(edge_node['owner']['username'])
-                    if not comment_owner:
-                        comment_owner = self.__save_user_basic(edge_node['owner'])
+                if not comment_owner:
+                    comment_owner = self.__save_user_basic(edge_node['owner'])
+                with db.write_transaction:
                     new_comment.owner.connect(comment_owner, {'created_at': created_at})
                     media.comments.connect(new_comment)
 
     @staticmethod
     def __save_user_basic(node):
-        existing_user = User.nodes.first_or_none(node['id'])
+        existing_user = User.nodes.first_or_none(user_id=node['id'])
         if existing_user: return existing_user
         user_kwargs = {
             'user_id': node['id'],
@@ -421,10 +431,11 @@ class AuthScraperBot():
         tagged_users = node.get('edge_media_to_tagged_user', {'edges': None}).get('edges')
         if not tagged_users: return
         for tagged_user in tagged_users:
-            with db.transaction:
+            with db.read_transaction:
                 user_tagged = User.match_username(tagged_user['node']['user']['username'])
-                if not user_tagged:
-                    user_tagged = self.__save_user_basic(tagged_user['node']['user'])
+            if not user_tagged:
+                user_tagged = self.__save_user_basic(tagged_user['node']['user'])
+            with db.write_transaction:
                 media.tagged_users.connect(user_tagged, {
                     'x': tagged_user['node']['x'],
                     'y': tagged_user['node']['y']
@@ -434,10 +445,11 @@ class AuthScraperBot():
         if not node.get('edge_media_to_sponsor_user', {'edges': None}).get('edges'):
             return
         for edge in node['edge_media_to_sponsor_user']['edges']:
-            with db.transaction:
+            with db.read_transaction:
                 sponsor = User.match_username(edge['node']['sponsor']['username'])
-                if not sponsor:
-                    sponsor = self.__save_user_basic(edge['node']['sponsor'])
+            if not sponsor:
+                sponsor = self.__save_user_basic(edge['node']['sponsor'])
+            with db.write_transaction:
                 media.sponsors.connect(sponsor)
 
     def __get_stories(self, user):
