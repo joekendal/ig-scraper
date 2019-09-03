@@ -16,6 +16,7 @@ import re
 import sys
 import textwrap
 import time
+import tempfile
 
 try:
     from urllib.parse import urlparse
@@ -1009,19 +1010,105 @@ class InstagramScraper(object):
         item['urls'] = urls
         return item
 
+    def download_file(self, full_url):
+        url = full_url.split('?')[0]
+        fd, path = tempfile.mkstemp()
+        headers = {'Host': urlparse(url).hostname}
+        downloaded = 0
+        total_length = None
+        try:
+            with os.fdopen(fd, 'wb') as tmp:
+                try:
+                    retry = 0
+                    retry_delay = RETRY_DELAY
+                    while True:
+                        if self.quit:
+                            return
+                        try:
+                            downloaded_before = downloaded
+                            headers['Range'] = 'bytes={0}-'.format(downloaded_before)
+                            with self.session.get(url, cookies=self.cookies, headers=headers, stream=True, timeout=CONNECT_TIMEOUT) as response:
+                                if response.status_code == 404 or response.status_code == 410:
+                                    break
+                                if response.status_code == 403 and url != full_url:
+                                    url = full_url
+                                    continue
+                                response.raise_for_status()
+                                if response.status_code == 206:
+                                    try:
+                                        match = re.match(r'bytes (?P<first>\d+)-(?P<last>\d+)/(?P<size>\d+)', response.headers['Content-Range'])
+                                        range_file_position = int(match.group('first'))
+                                        if range_file_position != downloaded_before:
+                                            raise Exception()
+                                        total_length = int(match.group('size'))
+                                        tmp.truncate(total_length)
+                                    except:
+                                        raise requests.exceptions.InvalidHeader('Invalid range response "{0}" for requested "{1}"'.format(
+                                            response.headers.get('Content-Range'), headers.get('Range')))
+                                elif response.status_code == 200:
+                                    if downloaded_before != 0:
+                                        downloaded_before = 0
+                                        downloaded = 0
+                                        tmp.seek(0)
+                                    content_length = response.headers.get('Content-Length')
+                                    if content_length is None:
+                                        self.logger.warning('No Content-Length in response, the file {0} may be partially downloaded'.format(base_name))
+                                    else:
+                                        total_length = int(content_length)
+                                        tmp.truncate(total_length)
+                                else:
+                                    raise PartialContentException('Wrong status code {0}', response.status_code)
+
+                                for chunk in response.iter_content(chunk_size=64*1024):
+                                    if chunk:
+                                        downloaded += len(chunk)
+                                        tmp.write(chunk)
+                                    if self.quit:
+                                        return
+
+                            if downloaded != total_length and total_length is not None:
+                                raise PartialContentException('Got first {0} bytes from {1}'.format(downloaded, total_length))
+                            break
+                        except (KeyboardInterrupt):
+                            raise
+                        except (requests.exceptions.RequestException, PartialContentException) as e:
+                            if downloaded - downloaded_before > 0:
+                                # if we got some data on this iteration do not count it as a failure
+                                self.logger.warning('Continue after exception {0} on {1}'.format(repr(e), url))
+                                retry = 0 # the next fail will be first in a row with no data
+                                continue
+                            if retry < MAX_RETRIES:
+                                self.logger.warning('Retry after exception {0} on {1}'.format(repr(e), url))
+                                self.sleep(retry_delay)
+                                retry_delay = min( 2 * retry_delay, MAX_RETRY_DELAY )
+                                retry = retry + 1
+                                continue
+                            else:
+                                keep_trying = self._retry_prompt(url, repr(e))
+                                if keep_trying == True:
+                                    retry = 0
+                                    continue
+                                elif keep_trying == False:
+                                    break
+                            raise
+                finally:
+                    tmp.truncate(downloaded)
+
+            if downloaded == total_length or total_length is None and downloaded > 100:
+                return path
+        except:
+            os.remove(path)
+            raise
+
     def download(self, item, save_dir='./'):
         """Downloads the media file."""
         for full_url, base_name in self.templatefilename(item):
             url = full_url.split('?')[0] #try the static url first, stripping parameters
-
             file_path = os.path.join(save_dir, base_name)
-
             if not os.path.exists(os.path.dirname(file_path)):
                 self.make_dir(os.path.dirname(file_path))
-
             if not os.path.isfile(file_path):
                 headers = {'Host': urlparse(url).hostname}
-
                 part_file = file_path + '.part'
                 downloaded = 0
                 total_length = None

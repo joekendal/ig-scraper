@@ -9,7 +9,7 @@ from core import colours
 from core.bots import threaded
 from core.api.InstagramAPI import InstagramAPI
 from core.api.InstagramScraper import InstagramScraper
-from core.api.AWS import EC2Proxy
+from core.api.AWS import EC2Proxy, upload_file
 from core.db.models import (User, Business, ProfilePicture, Picture, Sidecar,
                             Video, Hashtag, Comment, Location, Media, Poll,
                             StoryImage, StoryVideo)
@@ -264,7 +264,7 @@ class AuthScraperBot():
         media_kwargs = {
             'media_id': media['id'],'caption': caption,
             'shortcode': media['shortcode'], 'comments_disabled': media['comments_disabled'],
-            'edge_comments_count': media['edge_media_preview_comment'].get('count'),
+            'edge_comments_count': media.get('edge_media_preview_comment', {'count': None}).get('count') or media.get('edge_media_to_comment', {'count': None}).get('count'),
             'display_url': media['display_url'], 'taken_at': taken_at,
             'edge_liked_by_count': media['edge_media_preview_like']['count'],
             'height': media['dimensions']['height'],
@@ -449,10 +449,15 @@ class AuthScraperBot():
 
     @staticmethod
     def __save_user_basic(node):
-        existing_user = User.nodes.first_or_none(user_id=node['id'])
+        if node.get('id'):
+            existing_user = User.nodes.first_or_none(user_id=node['id'])
+        elif node.get('username'):
+            existing_user = User.nodes.first_or_none(username=node['username'])
+        else:
+            return False
         if existing_user: return existing_user
         user_kwargs = {
-            'user_id': node['id'],
+            'user_id': node.get('id'),
             'username': node.get('username'),
             'full_name': node.get('full_name'),
             'is_verified': node.get('is_verified'),
@@ -503,10 +508,29 @@ class AuthScraperBot():
             'can_reshare': kwargs.get('can_reshare'),
             'can_reply': kwargs.get('can_reply')
         }
-        # TODO: Download Story to S3 bucket
-        s3_uri = ""
+        # TODO: Download Story and upload to S3 bucket
+        if node.get('is_video'):
+            full_url = node['video_resources'][-1]['src']
+        else:
+            full_url = node['display_resources'][-1]['src']
+        filepath = self.scraper.download_file(full_url)
+        objectname = f'{story_kwargs["story_id"]}'
+        metadata = {
+            'type': 'Video' if node.get('is_video', False) is True else 'Image',
+            'user_id': str(user.user_id),
+            'posted_at': str(node['taken_at_timestamp']),
+            'expired_at': str(node['expiring_at_timestamp'])
+        }
+        r = upload_file(
+            file_path=filepath,
+            bucket='instagram-analytics',
+            object_name=objectname,
+            metadata=metadata
+        )
+        if not r: raise
+        os.remove(filepath)
         # Save story
-        story_kwargs['s3_uri'] = s3_uri
+        story_kwargs['s3_uri'] = f"s3://instagram-analytics/{objectname}"
         with db.write_transaction:
             if node['__typename'] == 'GraphStoryVideo' or node.get('is_video') is True:
                 story_kwargs['has_audio'] = node.get('has_audio')
@@ -583,7 +607,7 @@ class AuthScraperBot():
                 break
             new_stories.append(item)
 
-        for story in tqdm(reversed(new_stories), desc='Saving new stories'):
+        for story in tqdm(reversed(new_stories), desc='Saving new stories', total=len(new_stories), ascii=False):
             self.__save_story(story, user, can_reshare=data.get('can_reshare'),
                               can_reply=data.get('can_reply'))
 

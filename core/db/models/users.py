@@ -6,8 +6,8 @@ from .interactions import CommentRel
 
 
 class User(StructuredNode):
-    user_id = IntegerProperty(unique_index=True, required=True)
-    username = StringProperty(unique_index=True, required=True)
+    user_id = IntegerProperty(index=True)
+    username = StringProperty(unique_index=True)
     full_name = StringProperty()
     bio = StringProperty()
     is_private = BooleanProperty()

@@ -7,6 +7,10 @@ USER_INFO = 'https://i.instagram.com/api/v1/users/{0}/info/'
 
 QUERY_STORIES = BASE_URL + 'graphql/query/?query_hash=30a89afdd826d78a5376008a7b81c205&variables={0}'
 QUERY_STORIES_VARS = '{{"reel_ids":["{0}"],"tag_names":[],"location_ids":[],"highlight_reel_ids":[],"precomposed_overlay": false, "story_viewer_fetch_count": 50, "web_cursor": "", "stories_video_dash_manifest": false}}'
+QUERY_STORIES_HIGHLIGHTS_VARS = '{{"reel_ids":[],"tag_names":[],"location_ids":[],"highlight_reel_ids":["{0}"],"show_story_viewer_list":true,"story_viewer_fetch_count": 50, "story_viewer_cursor": "", "stories_video_dash_manifest": false}}'
+
+QUERY_HIGHLIGHTS = BASE_URL + 'graphql/query/?query_hash=aec5501414615eca36a9acf075655b1e&variables={0}'
+QUERY_HIGHLIGHTS_VARS = '{{"user_id":"{0}","include_highlight_reels":true}}'
 
 STORIES_URL = BASE_URL + 'graphql/query/?query_hash=45246d3fe16ccc6577e0bd297a5db1ab&variables=%7B%22reel_ids%22%3A%5B%22{0}%22%5D%2C%22tag_names%22%3A%5B%5D%2C%22location_ids%22%3A%5B%5D%2C%22highlight_reel_ids%22%3A%5B%5D%2C%22precomposed_overlay%22%3Afalse%7D'
 STORIES_UA = 'Instagram 52.0.0.8.83 (iPhone; CPU iPhone OS 11_4 like Mac OS X; en_US; en-US; scale=2.00; 750x1334) AppleWebKit/605.1.15'
